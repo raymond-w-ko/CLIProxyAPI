@@ -261,7 +261,7 @@ func (b *Builder) Build() (*Service, error) {
 			}
 		}
 
-		routingState := normalizedRoutingRuntimeState(b.cfg)
+		routingState := normalizedRoutingRuntimeState(b.cfg, b.configPath)
 		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
 		appliedRoutingState = &routingState
 	}

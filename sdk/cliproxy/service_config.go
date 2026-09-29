@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,10 +29,11 @@ type routingRuntimeState struct {
 	strategy                 string
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
+	sessionAffinityFile      string
 	sessionAffinitySubagents bool
 }
 
-func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
+func normalizedRoutingRuntimeState(cfg *config.Config, configPath string) routingRuntimeState {
 	state := routingRuntimeState{
 		strategy:                 "round-robin",
 		sessionAffinityTTL:       time.Hour,
@@ -48,6 +50,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	if state.sessionAffinity {
+		state.sessionAffinityFile = filepath.Join(filepath.Dir(configPath), "session-bindings.json")
+	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -77,6 +82,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 			Fallback:         selector,
 			TTL:              state.sessionAffinityTTL,
+			File:             state.sessionAffinityFile,
 			SubagentAffinity: &subagents,
 		})
 	}
@@ -213,7 +219,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
-	routingState := normalizedRoutingRuntimeState(commit.cfg)
+	routingState := normalizedRoutingRuntimeState(commit.cfg, s.configPath)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
 		s.appliedRoutingState = &routingState
