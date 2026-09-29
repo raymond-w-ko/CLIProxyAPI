@@ -143,6 +143,9 @@ type resultPolicyHolder struct {
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
+	// Keep durable stores across selector reloads, including in-flight selections.
+	durableStoresMu           sync.Mutex
+	durableStores             map[string]*durableSessionStore
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore

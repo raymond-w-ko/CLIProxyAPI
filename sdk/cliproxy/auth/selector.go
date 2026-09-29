@@ -910,6 +910,7 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
+	file             string
 	fallback         Selector
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
@@ -918,6 +919,8 @@ type SessionAffinitySelector struct {
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
+	// File enables durable ownership in Manager. Empty retains the in-memory policy.
+	File             string
 	Fallback         Selector
 	TTL              time.Duration
 	SubagentAffinity *bool
@@ -944,6 +947,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		subagentAffinity = *cfg.SubagentAffinity
 	}
 	return &SessionAffinitySelector{
+		file:             strings.TrimSpace(cfg.File),
 		fallback:         cfg.Fallback,
 		cache:            NewSessionCache(cfg.TTL),
 		matcher:          cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
