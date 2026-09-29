@@ -4,6 +4,7 @@ cli-proxy-api
 
 # Configuration
 config.yaml
+session-bindings.json
 .env
 
 # Generated content
@@ -31,6 +32,7 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
+!docs/durable-session-affinity.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
