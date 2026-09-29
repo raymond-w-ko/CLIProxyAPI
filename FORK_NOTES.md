@@ -53,19 +53,18 @@ Management page saves of the YAML do not modify this file.
 Use an image built from this fork's patched source. Upstream
 `eceasy/cli-proxy-api:latest` does not automatically include these changes.
 
-For a local image, run this from the patched checkout:
+GitHub Actions builds this fork for Linux x86_64 (`linux/amd64`) and publishes it
+to `ghcr.io/raymond-w-ko/cliproxyapi`. The VM only pulls and runs the image; it does
+not need enough RAM to compile Go. See the publishing notes below for workflow
+controls and package visibility.
 
-```bash
-docker build -t cliproxyapi-affinity:local .
-```
-
-Save this as your deployment's `compose.yaml`. Replace the image tag if you publish
-or obtain a different image containing the patch.
+Save this as your deployment's `compose.yaml`:
 
 ```yaml
 services:
   cliproxyapi:
-    image: cliproxyapi-affinity:local
+    image: ghcr.io/raymond-w-ko/cliproxyapi:latest
+    platform: linux/amd64
     command: ["./CLIProxyAPI", "--config", "/etc/cliproxy/config.yaml"]
     restart: unless-stopped
     ports:
@@ -107,11 +106,54 @@ Start with an explicit Compose filename to avoid selecting the repository's
 separate `docker-compose.yml`:
 
 ```bash
+docker compose -f compose.yaml pull
 docker compose -f compose.yaml up -d
 ```
 
 Bindings then persist at `./config/session-bindings.json` on the host. Preserve
 both `./config/` and `./auths/` across container replacements and backups.
+
+## Image publishing and workflow isolation
+
+The [Fork GHCR image workflow](.github/workflows/fork-ghcr.yml) runs on pushes to
+`main` and manual dispatches. Its job only runs in `raymond-w-ko/CLIProxyAPI` on
+`main`. It uses a standard Ubuntu x86_64 GitHub-hosted runner, the existing
+Dockerfile, and GitHub's temporary `GITHUB_TOKEN` with `contents: read` and
+`packages: write`. No Docker Hub credentials or personal access token are needed
+for publishing. Actions are pinned to commit SHAs.
+
+Each successful build publishes `latest` and `sha-<full Git commit SHA>`. Pin the
+commit tag or the digest from the run summary when you want controlled updates.
+Builds are serialized, and Docker layers are cached in GitHub Actions.
+
+The six inherited workflows are disabled individually in this fork's GitHub
+settings: `agents-md-guard`, `auto-retarget-main-pr-to-dev`, `docker-image`,
+`translator-path-guard`, `pr-test-build`, and `release`. Their source files remain
+unchanged for upstream synchronization. Do not enable all workflows when updating
+the fork; only `Fork GHCR image` is needed. Workflow disablement is a repository
+setting, so a new fork must apply it separately. Newly added upstream workflows
+also need review before pushing them into this fork.
+
+GitHub creates new GHCR packages as private by default, even for public source
+repositories. After the first publication, set this package's visibility to
+**Public** in its [package settings](https://github.com/users/raymond-w-ko/packages/container/cliproxyapi/settings).
+Public visibility permits anonymous pulls on the VM. A private package requires
+registry authentication. Verify anonymous access before relying on unattended
+updates; repository visibility alone does not establish package visibility.
+
+To trigger a rebuild manually:
+
+```bash
+gh workflow run fork-ghcr.yml --repo raymond-w-ko/CLIProxyAPI --ref main
+```
+
+For an optional local build on a stronger x86_64 machine:
+
+```bash
+docker build --platform linux/amd64 -t cliproxyapi-affinity:local .
+```
+
+Use `image: cliproxyapi-affinity:local` instead of the GHCR image for that deployment.
 
 ## Operational caveats
 
