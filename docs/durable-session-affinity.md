@@ -109,6 +109,24 @@ Claude determines which thinking blocks it can use after a permitted migration.
 
 ## Storage and deployment
 
+### Routing logs
+
+At info level, `session-affinity: durable binding created` and
+`session-affinity: durable binding migrated` are emitted only after the binding is
+successfully persisted. Each includes a 12-character prefix of the stored binding
+hash, the credential ID, provider, and requested model. Aliases share the same
+binding hash. Migration also includes `previous_auth`, `reason` (`credential_quota`
+or `model_quota`), and the authorizing `quota_reset` deadline in UTC. Request IDs
+connect these events to upstream failures in the same request.
+
+With debug logging enabled, `durable binding retained` identifies successful
+selection of an existing owner. Memory-cache events are explicitly labeled and
+logged only at debug level in durable mode; a memory-cache miss does not mean the
+persisted owner changed. Failed selection or persistence never emits a successful
+migration event. Durable ownership logs do not include raw session IDs or tokens.
+
+### Persistent files
+
 Keep the configuration directory writable and persistent, outside the watched
 `auth-dir`. For example, `--config /etc/cliproxy/config.yaml` stores bindings at
 `/etc/cliproxy/session-bindings.json`. New files have mode `0600`; the store uses a temporary file, file

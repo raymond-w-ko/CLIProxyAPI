@@ -198,6 +198,19 @@ Use `image: cliproxyapi-affinity:local` instead of the GHCR image for that deplo
   supported, including its internal `mixed` selection path. Antigravity credits
   fallback is disabled in durable mode because it bypasses normal selection.
 
+## Reading affinity logs
+
+At info level, look for `durable binding created` and `durable binding migrated`.
+These events are logged only after persistence succeeds. Migration includes the
+previous and replacement credential IDs, requested model, quota reason
+(`credential_quota` or `model_quota`), and quota reset deadline in UTC.
+
+The `binding` field is a 12-character prefix of the persisted binding hash, shared
+by aliases and stable across restarts. It does not expose the raw session ID.
+Enable debug logging to see `durable binding retained` and memory-cache events.
+A memory-cache miss does not mean the persisted binding changed. Failed selection
+or persistence does not produce a successful migration event.
+
 ## SDK lookup caveat
 
 `Manager.LookupSessionAffinity(provider, model, sessionID)` is a read-only Go API

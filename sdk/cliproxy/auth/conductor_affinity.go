@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -68,24 +69,27 @@ func durableSessionKey(provider, sessionID string, opts cliproxyexecutor.Options
 	return hex.EncodeToString(digest[:])
 }
 
-func (m *Manager) durableOwnerExhausted(authID, model string) bool {
+func (m *Manager) durableOwnerExhaustion(authID, model string) (string, time.Time) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	a := m.auths[authID]
 	if a == nil || a.Disabled || a.Status == StatusDisabled {
-		return false
+		return "", time.Time{}
 	}
 	now := time.Now()
 	if a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now) {
-		return true
+		return a.Quota.Reason, a.Quota.NextRecoverAt
 	}
 	state := existingModelState(a, m.selectionModelKeyForAuth(a, model))
-	return state != nil && state.Quota.Exceeded && state.Quota.Reason == ErrorCodeModelQuota && state.Quota.NextRecoverAt.After(now)
+	if state != nil && state.Quota.Exceeded && state.Quota.Reason == ErrorCodeModelQuota && state.Quota.NextRecoverAt.After(now) {
+		return state.Quota.Reason, state.Quota.NextRecoverAt
+	}
+	return "", time.Time{}
 }
 
 type durableAffinityPick func(cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error)
 
-func (m *Manager) pickWithDurableAffinity(providers []string, model string, opts cliproxyexecutor.Options, pick durableAffinityPick) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickWithDurableAffinity(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, pick durableAffinityPick) (*Auth, ProviderExecutor, string, error) {
 	s := m.durableAffinitySelector()
 	if s == nil {
 		return pick(opts)
@@ -109,6 +113,7 @@ func (m *Manager) pickWithDurableAffinity(providers []string, model string, opts
 	}
 	key := durableSessionKey(providers[0], sessionID, opts)
 	owner := store.owner(key)
+	previousOwner := owner
 	var aliases []string
 	isFork, _ := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
 	isSubagent := !isFork && isSubagentSession(sessionID, parentID)
@@ -125,7 +130,8 @@ func (m *Manager) pickWithDurableAffinity(providers []string, model string, opts
 			owner = parentOwner
 		}
 	}
-	if owner != "" && !m.durableOwnerExhausted(owner, model) {
+	quotaReason, quotaReset := m.durableOwnerExhaustion(owner, model)
+	if owner != "" && quotaReason == "" {
 		if pinned := pinnedAuthIDFromMetadata(opts.Metadata); pinned != "" && pinned != owner {
 			return nil, nil, "", durableAffinityError("session_affinity_conflict", "requested credential conflicts with the durable session owner")
 		}
@@ -143,14 +149,36 @@ func (m *Manager) pickWithDurableAffinity(providers []string, model string, opts
 		return a, executor, provider, errPick
 	}
 	if errBind := store.bind(key, a.ID, aliases...); errBind != nil {
-		log.WithError(errBind).Error("persist durable session affinity")
+		logEntryWithRequestID(ctx).WithError(errBind).Error("persist durable session affinity")
 		return nil, nil, "", durableAffinityError("session_affinity_storage", "cannot persist session owner; upstream request was not sent")
+	}
+	// Only report ownership after it has been persisted. Aliases use the same
+	// binding hash, so logs remain correlatable across request identities/restarts.
+	binding := store.root(key)
+	if len(binding) > 12 {
+		binding = binding[:12]
+	}
+	entry := logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"binding": binding, "auth": a.ID, "provider": provider, "model": model,
+	})
+	// The standard text formatter omits arbitrary fields; include these in the message too.
+	detail := fmt.Sprintf("binding=%s auth=%q provider=%q model=%q", binding, a.ID, provider, model)
+	switch {
+	case owner != "" && owner != a.ID:
+		reset := quotaReset.UTC().Format(time.RFC3339)
+		entry.WithFields(log.Fields{"previous_auth": owner, "reason": quotaReason, "quota_reset": reset}).
+			Infof("session-affinity: durable binding migrated | %s previous_auth=%q reason=%s quota_reset=%s", detail, owner, quotaReason, reset)
+	case previousOwner == "":
+		entry.WithField("inherited_from_auth", owner).
+			Infof("session-affinity: durable binding created | %s inherited_from_auth=%q", detail, owner)
+	default:
+		entry.Debugf("session-affinity: durable binding retained | %s", detail)
 	}
 	return a, executor, provider, nil
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
-	a, executor, _, errPick := m.pickWithDurableAffinity([]string{provider}, model, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
+	a, executor, _, errPick := m.pickWithDurableAffinity(ctx, []string{provider}, model, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
 		a, executor, errPick := m.pickNextLegacyUnbound(ctx, provider, model, pickOpts, tried)
 		return a, executor, provider, errPick
 	})
@@ -158,7 +186,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	return m.pickWithDurableAffinity(providers, model, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
+	return m.pickWithDurableAffinity(ctx, providers, model, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
 		return m.pickNextMixedLegacyUnbound(ctx, providers, model, pickOpts, tried)
 	})
 }
@@ -184,7 +212,7 @@ func (m *Manager) durableRetryOwner(providers []string, model string, opts clipr
 		return "", store.err
 	}
 	owner := store.owner(durableSessionKey(providers[0], sessionID, opts))
-	if m.durableOwnerExhausted(owner, model) {
+	if reason, _ := m.durableOwnerExhaustion(owner, model); reason != "" {
 		return "", nil
 	}
 	return owner, nil
