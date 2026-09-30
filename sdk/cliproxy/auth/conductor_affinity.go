@@ -68,17 +68,24 @@ func durableSessionKey(provider, sessionID string, opts cliproxyexecutor.Options
 	return hex.EncodeToString(digest[:])
 }
 
-func (m *Manager) durableOwnerExhausted(authID string) bool {
+func (m *Manager) durableOwnerExhausted(authID, model string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	a := m.auths[authID]
-	return a != nil && !a.Disabled && a.Status != StatusDisabled &&
-		a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(time.Now())
+	if a == nil || a.Disabled || a.Status == StatusDisabled {
+		return false
+	}
+	now := time.Now()
+	if a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	state := existingModelState(a, m.selectionModelKeyForAuth(a, model))
+	return state != nil && state.Quota.Exceeded && state.Quota.Reason == ErrorCodeModelQuota && state.Quota.NextRecoverAt.After(now)
 }
 
 type durableAffinityPick func(cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error)
 
-func (m *Manager) pickWithDurableAffinity(providers []string, opts cliproxyexecutor.Options, pick durableAffinityPick) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickWithDurableAffinity(providers []string, model string, opts cliproxyexecutor.Options, pick durableAffinityPick) (*Auth, ProviderExecutor, string, error) {
 	s := m.durableAffinitySelector()
 	if s == nil {
 		return pick(opts)
@@ -118,7 +125,7 @@ func (m *Manager) pickWithDurableAffinity(providers []string, opts cliproxyexecu
 			owner = parentOwner
 		}
 	}
-	if owner != "" && !m.durableOwnerExhausted(owner) {
+	if owner != "" && !m.durableOwnerExhausted(owner, model) {
 		if pinned := pinnedAuthIDFromMetadata(opts.Metadata); pinned != "" && pinned != owner {
 			return nil, nil, "", durableAffinityError("session_affinity_conflict", "requested credential conflicts with the durable session owner")
 		}
@@ -143,7 +150,7 @@ func (m *Manager) pickWithDurableAffinity(providers []string, opts cliproxyexecu
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
-	a, executor, _, errPick := m.pickWithDurableAffinity([]string{provider}, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
+	a, executor, _, errPick := m.pickWithDurableAffinity([]string{provider}, model, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
 		a, executor, errPick := m.pickNextLegacyUnbound(ctx, provider, model, pickOpts, tried)
 		return a, executor, provider, errPick
 	})
@@ -151,14 +158,14 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	return m.pickWithDurableAffinity(providers, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
+	return m.pickWithDurableAffinity(providers, model, opts, func(pickOpts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
 		return m.pickNextMixedLegacyUnbound(ctx, providers, model, pickOpts, tried)
 	})
 }
 
 // durableRetryOwner makes the existing retry budget and cooldown calculation
 // consider the bound account rather than an unrelated, immediately ready account.
-func (m *Manager) durableRetryOwner(providers []string, opts cliproxyexecutor.Options) (string, error) {
+func (m *Manager) durableRetryOwner(providers []string, model string, opts cliproxyexecutor.Options) (string, error) {
 	s := m.durableAffinitySelector()
 	if s == nil {
 		return "", nil
@@ -177,7 +184,7 @@ func (m *Manager) durableRetryOwner(providers []string, opts cliproxyexecutor.Op
 		return "", store.err
 	}
 	owner := store.owner(durableSessionKey(providers[0], sessionID, opts))
-	if m.durableOwnerExhausted(owner) {
+	if m.durableOwnerExhausted(owner, model) {
 		return "", nil
 	}
 	return owner, nil

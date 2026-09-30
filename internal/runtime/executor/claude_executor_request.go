@@ -663,6 +663,11 @@ func (claudeEntitlementError) IsCredentialScoped() bool {
 type claudeRateLimitError struct {
 	statusErr
 	credentialScoped bool
+	modelQuota       bool
+}
+
+func (e claudeRateLimitError) IsModelQuotaExhausted() bool {
+	return e.modelQuota
 }
 
 func (e claudeRateLimitError) IsCredentialScoped() bool {
@@ -701,7 +706,8 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
 			return claudeEntitlementError{err}
 		}
 		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection)
-		return claudeRateLimitError{statusErr: err, credentialScoped: false}
+		return claudeRateLimitError{statusErr: err, modelQuota: helps.ClaudeHeadersIndicateModelQuotaRejection(headers) ||
+			helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers)}
 	}
 	return err
 }

@@ -1385,7 +1385,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	if owner, errOwner := m.durableRetryOwner(providers, opts); errOwner != nil {
+	if owner, errOwner := m.durableRetryOwner(providers, model, opts); errOwner != nil {
 		return 0, false
 	} else if owner != "" {
 		pinnedAuthID = owner

@@ -96,6 +96,8 @@ func newCooldownView(scope, model string, next, now time.Time, quota QuotaState,
 		switch quota.Reason {
 		case "credential_quota", "quota":
 			view.Reason = quota.Reason
+		case ErrorCodeModelQuota:
+			view.Reason = "quota"
 		case "cloudflare challenge":
 			view.Reason = "cloudflare_challenge"
 		}

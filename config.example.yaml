@@ -133,7 +133,7 @@ routing:
   # Enable durable session ownership for a single standalone proxy process.
   # Bindings are saved automatically to session-bindings.json beside this config file.
   # Requires a stable explicit session ID; binds across models with no expiration.
-  # Only confirmed credential-wide quota exhaustion allows automatic migration.
+  # Only confirmed quota exhaustion for the credential or requested model allows migration.
   # Temporary errors retain the owner and use existing retry limits and cooldowns.
   # An established owner outranks credential priority, including after account recovery.
   # The config directory must be writable and persistent, including in Docker.

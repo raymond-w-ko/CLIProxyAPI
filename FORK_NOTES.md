@@ -1,10 +1,10 @@
 # Fork notes: durable session affinity
 
 This fork keeps each session bound to one account across model changes, config
-reloads, and restarts. Only confirmed account-wide quota exhaustion permits a
-switch. Temporary errors, repeated failures, and generic HTTP 429 responses keep
-the binding. The existing retry budgets, refresh, cooldowns, and wait limits still
-apply; this patch adds no retry loops or network timeouts.
+reloads, and restarts. Only confirmed quota exhaustion for the account or requested
+model permits a switch. Temporary errors, repeated failures, and generic HTTP 429
+responses keep the binding. The existing retry budgets, refresh, cooldowns, and
+wait limits still apply; this patch adds no retry loops or network timeouts.
 
 After a permitted switch, the replacement remains the owner even when the old
 account recovers. Account affinity reduces unnecessary Claude thinking loss, but
@@ -41,8 +41,9 @@ page controls:
   beside the auth files. Binding persistence alone does not preserve those
   deadlines; without cooldown persistence, a restart may probe an exhausted account.
 - Cooldowns must remain enabled, including any provider or credential overrides.
-  Claude's `model-level-cooling` must remain `false` so confirmed account-wide
-  exhaustion can authorize migration.
+  Leave Claude's `model-level-cooling` at `false` so shared quota exhaustion cools
+  the entire account. Explicit Fable quota exhaustion remains model-scoped and can
+  authorize session migration without cooling healthy sibling models.
 
 No `session-affinity-file` setting is needed. The file is always
 `session-bindings.json` beside the active config file, including with `--config`.
@@ -166,9 +167,19 @@ Use `image: cliproxyapi-affinity:local` instead of the GHCR image for that deplo
   owner; joining aliases with conflicting owners fails with
   `session_affinity_conflict`.
 - **A 429 alone is not proof of exhaustion.** Claude needs the existing upstream
-  header classification to establish an active account-wide quota cooldown.
-  Other providers need the same account-wide state from their existing handlers.
-  Repeated temporary failures never authorize switching.
+  header classification for shared quotas or an explicit rejected model window
+  (`Anthropic-Ratelimit-Unified-7d_oi-Status: rejected`). The replacement owns the
+  whole session. Generic 429s, `Retry-After` alone, and repeated temporary failures
+  never authorize switching. Other providers need an explicit quota classification
+  from their handlers.
+- **Both accounts exhausted does not cause endless retries.** Cooldowns exclude
+  exhausted accounts. `routing.retry.request-retry` bounds additional rounds;
+  `routing.retry.max-retry-interval` caps each wait, not total request duration.
+  Once the budget or wait limit is reached, the proxy returns 429. Requests during
+  cooldown can fail locally without calling upstream. Clients should honor
+  `Retry-After` when present, otherwise use exponential backoff with jitter.
+  Explicit Fable model reset deadlines are honored; missing applicable deadlines
+  retain the existing exponential cooldown (up to 30 minutes).
 - **Availability may decrease intentionally.** A missing, disabled, or
   model-incompatible owner returns an error instead of switching. Keep credential
   IDs stable. If no eligible replacement exists after exhaustion, the old binding

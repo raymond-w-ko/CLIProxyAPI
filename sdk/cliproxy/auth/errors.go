@@ -30,6 +30,10 @@ const transientTransportErrorCode = ErrorCodeTransientTransport
 // ErrorCodeForceCooldown marks failures that must enforce credential cooldown.
 const ErrorCodeForceCooldown = "force_cooldown"
 
+// ErrorCodeModelQuota marks an explicitly confirmed quota rejection for the
+// requested model, rather than an unclassified HTTP 429.
+const ErrorCodeModelQuota = "model_quota"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

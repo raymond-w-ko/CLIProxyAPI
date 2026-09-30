@@ -437,3 +437,104 @@ func TestDurableAffinityChildMigrationDoesNotRebindParent(t *testing.T) {
 		}
 	}
 }
+
+func TestDurableAffinityModelQuotaScopeAndPersistence(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	m, ids := durableTestManager(t, path)
+	store := NewFileCooldownStateStore(t.TempDir())
+	m.SetCooldownStateStore(store)
+	opts := durableTestOptions()
+	if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+		t.Fatal(errPick)
+	}
+	cooldown := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429, Message: "confirmed model quota"}, RetryAfter: &cooldown})
+	// A late concurrent generic response cannot erase the already confirmed window.
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{HTTPStatus: 429, Message: "rate limit"}})
+	restarted, _ := durableTestManager(t, path)
+	restarted.SetCooldownStateStore(store)
+	if errRestore := restarted.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatal(errRestore)
+	}
+	// A healthy sibling model must not authorize moving the same session.
+	if a, errPick := durableTestPick(restarted, "model-two", opts); errPick != nil || a.ID != ids[0] {
+		t.Fatalf("sibling selection = %v, %v", a, errPick)
+	}
+	if a, errPick := durableTestPick(restarted, "model-one", opts); errPick != nil || a.ID != ids[1] {
+		t.Fatalf("persisted model quota migration = %v, %v", a, errPick)
+	}
+	// Migration moves the whole session, even with healthy accounts after restart.
+	restartedAgain, _ := durableTestManager(t, path)
+	if a, errPick := durableTestPick(restartedAgain, "model-two", opts); errPick != nil || a.ID != ids[1] {
+		t.Fatalf("replacement did not retain whole-session ownership: %v, %v", a, errPick)
+	}
+}
+
+func TestDurableAffinityExpiredModelQuotaKeepsOwner(t *testing.T) {
+	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
+	opts := durableTestOptions()
+	opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+	if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+		t.Fatal(errPick)
+	}
+	m.mu.Lock()
+	m.auths[ids[1]].ModelStates = map[string]*ModelState{"model-one": {Quota: QuotaState{
+		Exceeded: true, Reason: ErrorCodeModelQuota, NextRecoverAt: time.Now().Add(-time.Hour),
+	}}}
+	m.mu.Unlock()
+	if a, errPick := durableTestPick(m, "model-one", durableTestOptions()); errPick != nil || a.ID != ids[1] {
+		t.Fatalf("expired quota migrated owner: %v, %v", a, errPick)
+	}
+}
+
+func TestDurableAffinityModelQuotaSurvivesLateSuccess(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
+	opts := durableTestOptions()
+	if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+		t.Fatal(errPick)
+	}
+	cooldown := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &cooldown})
+	// A request accepted before exhaustion can complete after the rejection.
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Success: true})
+	if a, errPick := durableTestPick(m, "model-one", opts); errPick != nil || a.ID != ids[1] {
+		t.Fatalf("late success erased confirmed exhaustion: %v, %v", a, errPick)
+	}
+}
+
+func TestDurableAffinityModelQuotaDoesNotConfirmGenericDeadline(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
+	longCooldown := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{HTTPStatus: 429}, RetryAfter: &longCooldown})
+	shortCooldown := time.Minute
+	before := time.Now()
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &shortCooldown})
+	m.mu.RLock()
+	state := m.auths[ids[0]].ModelStates["model-one"]
+	confirmedUntil, retryAt := state.Quota.NextRecoverAt, state.NextRetryAfter
+	m.mu.RUnlock()
+	if confirmedUntil.Before(before.Add(shortCooldown)) || confirmedUntil.After(time.Now().Add(shortCooldown)) {
+		t.Fatalf("confirmation inherited an unclassified deadline: %v", confirmedUntil)
+	}
+	if retryAt.Before(before.Add(59 * time.Minute)) {
+		t.Fatalf("existing retry deadline was shortened: %v", retryAt)
+	}
+	// Reversing the response order must neither erase nor extend confirmation.
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{HTTPStatus: 429}, RetryAfter: &longCooldown})
+	m.mu.RLock()
+	state = m.auths[ids[0]].ModelStates["model-one"]
+	confirmationRetained := state.Quota.Reason == ErrorCodeModelQuota && state.Quota.NextRecoverAt.Equal(confirmedUntil)
+	m.mu.RUnlock()
+	if !confirmationRetained {
+		t.Fatal("later generic response changed the confirmed window")
+	}
+}

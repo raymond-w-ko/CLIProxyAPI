@@ -169,7 +169,7 @@ func TestClassifyClaudeUpstreamError_SharedOrAmbiguousRejectionRemainsCredential
 }
 
 func TestClassifyClaudeUpstreamError_FableRetryDuration(t *testing.T) {
-	t.Run("retry-after header is skipped for overage rejection to avoid global cooldown", func(t *testing.T) {
+	t.Run("model reset takes precedence over shorter retry-after", func(t *testing.T) {
 		headers := http.Header{
 			"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
 			"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
@@ -182,12 +182,12 @@ func TestClassifyClaudeUpstreamError_FableRetryDuration(t *testing.T) {
 		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fable usage window rejected."}}`))
 
 		var retry retryAfterProvider
-		if errors.As(err, &retry) && retry != nil && retry.RetryAfter() != nil {
-			t.Fatalf("expected overage Retry-After to yield nil RetryAfter for exponential backoff, got %v", *retry.RetryAfter())
+		if !errors.As(err, &retry) || retry.RetryAfter() == nil || *retry.RetryAfter() < 7*24*time.Hour-time.Second {
+			t.Fatalf("expected model reset deadline, got %v", err)
 		}
 	})
 
-	t.Run("7d_oi reset only does not set week-long retry duration", func(t *testing.T) {
+	t.Run("7d_oi reset supplies model cooldown", func(t *testing.T) {
 		headers := http.Header{
 			"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
 			"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
@@ -199,8 +199,8 @@ func TestClassifyClaudeUpstreamError_FableRetryDuration(t *testing.T) {
 		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fable usage window rejected."}}`))
 
 		var retry retryAfterProvider
-		if errors.As(err, &retry) && retry != nil && retry.RetryAfter() != nil {
-			t.Fatalf("expected Fable 7d_oi-only reset to yield nil RetryAfter, got %v", *retry.RetryAfter())
+		if !errors.As(err, &retry) || retry.RetryAfter() == nil || *retry.RetryAfter() < 7*24*time.Hour-time.Second {
+			t.Fatalf("expected model reset deadline, got %v", err)
 		}
 	})
 }
@@ -268,7 +268,7 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionDoesNotBlockOpus(t *testin
 		t.Fatalf("Fable upstream attempts = %d, want 1", got)
 	}
 
-	// Verify that Fable model state cooldown is driven by Retry-After (~120s) and not 7 days.
+	// The rejected model's reset governs its cooldown, without blocking Opus.
 	updatedAuth, ok := manager.GetByID(auth.ID)
 	if !ok || updatedAuth == nil {
 		t.Fatal("auth not found")
@@ -277,8 +277,8 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionDoesNotBlockOpus(t *testin
 	if fableState == nil {
 		t.Fatal("fable model state not found")
 	}
-	if fableState.Quota.NextRecoverAt.After(time.Now().Add(5 * time.Minute)) {
-		t.Fatalf("fable model state cooldown too long: NextRecoverAt = %v (want ~120s, not 7 days)", fableState.Quota.NextRecoverAt)
+	if fableState.Quota.NextRecoverAt.Before(time.Unix(reset, 0)) || fableState.Quota.Reason != cliproxyauth.ErrorCodeModelQuota {
+		t.Fatalf("expected confirmed model quota through reset, got %+v", fableState.Quota)
 	}
 
 	payloadOpus := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)

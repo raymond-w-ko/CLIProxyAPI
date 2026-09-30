@@ -50,23 +50,43 @@ not move the parent or siblings.
 
 ## Failures and migration
 
-Normal errors, network failures, generic HTTP 429 responses, authentication
-failures, and model-specific limits retain ownership. The existing retry budget,
-credential refresh, cooldowns, and cooldown wait limits continue to apply, but
+Normal errors, network failures, generic HTTP 429 responses, and authentication
+failures retain ownership. The existing retry budget, credential refresh,
+cooldowns, and cooldown wait limits continue to apply, but
 retry selection cannot switch to an unrelated healthy credential. No new network
 timeouts or retry loops are introduced.
 
-Migration is allowed only while the current owner has an active, confirmed
-credential-wide quota cooldown. Claude already classifies shared subscription
-window rejections from upstream rate-limit headers separately from model-specific
-or overage-only rejections. A generic `rate_limit_error` body is insufficient.
-Other providers migrate only if their existing error handling establishes the same
-credential-wide quota state. Disabling cooldowns prevents this migration signal.
+Migration is allowed only while the current owner has an active, confirmed quota
+cooldown for the whole credential or the requested model. Claude's explicit
+`Anthropic-Ratelimit-Unified-7d_oi-Status: rejected` signal authorizes migration
+for the Fable/overage-included model window without cooling healthy sibling
+models. Its model-specific reset deadline is honored when supplied. A generic
+`rate_limit_error` body, `Retry-After` alone, or disabled overage alone is not proof.
+Other providers retain their existing credential-wide classification unless they
+explicitly report model-quota exhaustion. Disabling cooldowns prevents migration.
+Late successful responses do not clear an active confirmed model cooldown. A
+longer generic cooldown still delays retries, but does not extend the confirmed
+model-exhaustion deadline that authorizes migration.
 
-Claude's `oauth.providers.claude.model-level-cooling: true` also suppresses this
-signal by deliberately treating shared quota rejection as model-scoped. Leave it
-`false` to allow migration on confirmed shared quota exhaustion. Durable affinity
-does not override your cooldown classification settings.
+Keep Claude's `oauth.providers.claude.model-level-cooling: false` so shared quota
+rejections cool the entire account. Setting it to `true` scopes even shared
+rejections to the requested model; an explicit quota rejection can still authorize
+migration for that model. Migration always moves the whole session, not just one
+model's requests.
+
+If all accounts are exhausted, existing cooldowns exclude them from selection.
+`routing.retry.request-retry` bounds additional rounds and
+`routing.retry.max-retry-interval` caps each cooldown wait, not total request time.
+The proxy returns 429 when the budget is spent or the next wait exceeds that cap.
+Later client requests with cooldowns beyond that cap fail locally without
+upstream traffic.
+Clients should honor `Retry-After` when present and otherwise use exponential
+backoff with jitter. No background retry loop is introduced.
+
+Previously saved generic `quota` cooldowns do not prove model exhaustion and are
+not upgraded automatically. After their cooldown expires, a fresh upstream response
+can establish the confirmed `model_quota` state, which existing cooldown
+persistence saves across restarts.
 
 Ownership persistence and cooldown persistence are separate. Enable the existing
 `routing.cooldown.save-cooldown-status` setting to retain known reset deadlines

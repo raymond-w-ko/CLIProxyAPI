@@ -789,6 +789,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if result.Success {
 			if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 				// Retain active credential-scoped cooldown
+			} else if modelState != nil && modelState.Quota.Exceeded && modelState.Quota.Reason == ErrorCodeModelQuota && modelState.Quota.NextRecoverAt.After(now) {
+				// A late success (including token counting) does not disprove an
+				// explicit model rejection with an active recovery deadline.
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
 				modelState = state
@@ -872,6 +875,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							var next time.Time
 							var credentialNext time.Time
+							modelQuota := result.Error != nil && result.Error.Code == ErrorCodeModelQuota
 							backoffLevel := state.Quota.BackoffLevel
 							if result.CredentialScope {
 								backoffLevel = 0
@@ -888,6 +892,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next = now.Add(cooldown).Round(0)
 								} else {
 									quotaForFailure := state.Quota
+									if modelQuota && quotaForFailure.Reason != ErrorCodeModelQuota {
+										quotaForFailure.NextRecoverAt = time.Time{}
+									}
 									if result.CredentialScope {
 										if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" {
 											quotaForFailure = auth.Quota
@@ -899,15 +906,28 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
-								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
+								// An unclassified deadline cannot lengthen confirmed
+								// exhaustion. The retry deadline is preserved separately below.
+								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) &&
+									(!modelQuota || state.Quota.Reason == ErrorCodeModelQuota) {
 									next = state.Quota.NextRecoverAt
 								}
 							}
 							state.NextRetryAfter = next
+							quotaNext := next
+							quotaReason := "quota"
+							// A concurrent unclassified 429 must not erase a still-valid
+							// confirmation, or extend it beyond its original deadline.
+							if modelQuota {
+								quotaReason = ErrorCodeModelQuota
+							} else if !disableCooling && state.Quota.Exceeded && state.Quota.Reason == ErrorCodeModelQuota && state.Quota.NextRecoverAt.After(now) {
+								quotaReason = ErrorCodeModelQuota
+								quotaNext = state.Quota.NextRecoverAt
+							}
 							applyCooldownFields(&state.Quota, QuotaState{
 								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
+								Reason:        quotaReason,
+								NextRecoverAt: quotaNext,
 								BackoffLevel:  backoffLevel,
 							})
 							if result.CredentialScope && !disableCooling {
@@ -1499,6 +1519,12 @@ func resultErrorFromError(err error) *Error {
 	case isTransientTransportError(err):
 		if resultErr.Code == "" || resultErr.Code == transientTransportErrorCode {
 			resultErr.Code = transientTransportErrorCode
+		}
+	default:
+		var quota interface{ IsModelQuotaExhausted() bool }
+		if resultErr.HTTPStatus == http.StatusTooManyRequests && resultErr.Code == "" &&
+			errors.As(err, &quota) && quota.IsModelQuotaExhausted() {
+			resultErr.Code = ErrorCodeModelQuota
 		}
 	}
 	return resultErr

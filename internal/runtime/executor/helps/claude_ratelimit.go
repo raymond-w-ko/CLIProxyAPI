@@ -41,6 +41,12 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 	return !isOverageOrFableOnlyRejection(headers, status5h, status7d, status7dOI)
 }
 
+// ClaudeHeadersIndicateModelQuotaRejection requires an explicit rejection of
+// the Fable/overage-included window. A generic 429 or disabled overage is not proof.
+func ClaudeHeadersIndicateModelQuotaRejection(headers http.Header) bool {
+	return strings.EqualFold(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")), "rejected")
+}
+
 func isClaudeWindowAllowed(status string) bool {
 	return status == "allowed" || status == "allowed_warning"
 }
@@ -165,8 +171,9 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		}
 	}
 
-	// 4. Fable-specific 7-day window reset (only when rejected and not an overage/Fable-only rejection)
-	if status7dOI == "rejected" && !overageOnlyRejection {
+	// 4. An explicitly rejected model window supplies its own reset deadline.
+	// The caller keeps this cooldown model-scoped when shared windows are healthy.
+	if status7dOI == "rejected" {
 		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset"); raw != "" {
 			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
 				candidateDeadlines = append(candidateDeadlines, t)

@@ -358,7 +358,7 @@ type RoutingConfig struct {
 
 	// SessionAffinity enables durable, provider-wide session ownership in standalone services.
 	// Bindings are stored beside the configuration file in session-bindings.json.
-	// Requires explicit session IDs. Only confirmed credential-wide quota exhaustion
+	// Requires explicit session IDs. Only confirmed credential or requested-model quota exhaustion
 	// permits automatic migration; temporary errors retain the owner.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
