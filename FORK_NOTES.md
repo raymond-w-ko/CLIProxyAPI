@@ -13,7 +13,7 @@ cannot transfer thinking blocks between unrelated accounts.
 ## Recommended configuration
 
 Merge these settings into your existing `config.yaml`. Preserve the other settings
-and do not create duplicate `routing` or `oauth` sections.
+and do not create duplicate `routing`, `oauth`, or `upstream` sections.
 
 ```yaml
 routing:
@@ -25,9 +25,10 @@ routing:
 
 oauth:
   auth-dir: /root/.cli-proxy-api
-  providers:
-    claude:
-      model-level-cooling: false
+
+upstream:
+  claude:
+    model-level-cooling: false
 ```
 
 These are existing config options, not additional code changes or new management
@@ -48,6 +49,21 @@ page controls:
 No `session-affinity-file` setting is needed. The file is always
 `session-bindings.json` beside the active config file, including with `--config`.
 Management page saves of the YAML do not modify this file.
+
+## Upstream shared provider settings update
+
+Upstream commits `52d5507d` and `3be5fa44` move shared Claude, Codex, and xAI
+settings into `upstream.<provider>`. These settings now apply to both OAuth and
+API-key credentials. OAuth-only settings and `oauth.auth-dir` remain under
+`oauth`.
+
+For this deployment, the recommended Claude setting is now
+`upstream.claude.model-level-cooling: false`. Historical
+`oauth.providers.claude.model-level-cooling` remains accepted, so an immediate
+manual edit is not required. The canonical path wins when both are present,
+including explicit `false`. Saving an existing v8 configuration normalizes it
+to the current layout; historical v8 management paths remain supported.
+Durable bindings and quota-only migration are unchanged.
 
 ## Upstream apply_patch compatibility update
 

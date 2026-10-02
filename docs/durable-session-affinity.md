@@ -68,7 +68,7 @@ Late successful responses do not clear an active confirmed model cooldown. A
 longer generic cooldown still delays retries, but does not extend the confirmed
 model-exhaustion deadline that authorizes migration.
 
-Keep Claude's `oauth.providers.claude.model-level-cooling: false` so shared quota
+Keep Claude's `upstream.claude.model-level-cooling: false` so shared quota
 rejections cool the entire account. Setting it to `true` scopes even shared
 rejections to the requested model; an explicit quota rejection can still authorize
 migration for that model. Migration always moves the whole session, not just one
