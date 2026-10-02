@@ -49,6 +49,36 @@ No `session-affinity-file` setting is needed. The file is always
 `session-bindings.json` beside the active config file, including with `--config`.
 Management page saves of the YAML do not modify this file.
 
+## Upstream apply_patch compatibility update
+
+Upstream commit `3ebee065` adds a compatibility bridge for Codex's custom,
+freeform `apply_patch` tool across Claude, Gemini, and other supported executors.
+It wraps patch text in a JSON function argument named `input` for upstream models
+and restores Responses custom-tool events for the client. Native Codex keeps its
+native protocol. The proxy does not execute patches or edit files; the client
+still performs the tool call. The bridge validates argument encoding, call
+identity, and completion, not whether the patch itself is correct.
+
+The following commit, `63c04b4b`, makes catalog advertisement opt-in, including
+for native Codex models. To advertise the tool to clients that use
+`/v1/models?client_version=`, merge this into your configuration:
+
+```yaml
+client:
+  codex:
+    enable-apply-patch: true
+```
+
+The default is `false`, which clears `apply_patch_tool_type` in that catalog.
+This is an advertisement switch, not a tool-execution or translation guard:
+explicitly supplied custom tool declarations can still use the bridge. Support
+is advertised only when every executor for the public model supports it.
+
+`optimize-multi-agent-v2` also moves to `client.codex.optimize-multi-agent-v2`.
+Legacy YAML paths migrate on load; the new path wins when both are present,
+including explicit `false`. The setting now applies to API-key and OAuth routes.
+These upstream settings do not change durable ownership or quota-only migration.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

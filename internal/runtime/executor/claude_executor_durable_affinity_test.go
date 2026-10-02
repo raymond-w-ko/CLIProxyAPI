@@ -172,3 +172,67 @@ func TestClaudeModelQuotaRequiresExplicitRejection(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeDurableAffinityApplyPatchFailureKeepsOwner(t *testing.T) {
+	for _, mode := range []string{"nonstream", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			const model = "claude-sonnet-4-6"
+			var mu sync.Mutex
+			attempts := map[string]int{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				key := r.Header.Get("X-Api-Key")
+				if key == "" {
+					key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				}
+				mu.Lock()
+				attempts[key]++
+				mu.Unlock()
+				// Claude uses an upstream stream for Responses translation in both modes.
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, task6ProviderFixture("claude", "stream", "apply_patch"))
+			}))
+			defer server.Close()
+			selector := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
+				File: filepath.Join(t.TempDir(), "bindings.json"), Fallback: &cliproxyauth.FillFirstSelector{},
+			})
+			defer selector.Stop()
+			manager := cliproxyauth.NewManager(nil, selector, nil)
+			manager.SetRetryConfig(0, 0, 0)
+			manager.RegisterExecutor(NewClaudeExecutor(&config.Config{}))
+			ids := []string{t.Name() + "-a", t.Name() + "-b"}
+			for i, key := range []string{"first", "second"} {
+				id := ids[i]
+				registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}, {ID: "claude-opus-5"}})
+				defer registry.GetGlobalRegistry().UnregisterClient(id)
+				if _, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), &cliproxyauth.Auth{
+					ID: id, Provider: "claude", Attributes: map[string]string{"api_key": key, "base_url": server.URL},
+				}); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+			}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Headers: http.Header{"X-Session-Id": {"stable"}}}
+			req := cliproxyexecutor.Request{Model: model, Payload: []byte(task6PatchRequest)}
+			if mode == "stream" {
+				stream, errStream := manager.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+				if errStream != nil {
+					assertTask6PatchError(t, errStream)
+				} else {
+					assertTask6FailedStream(t, stream.Chunks)
+				}
+			} else {
+				_, errExecute := manager.Execute(context.Background(), []string{"claude"}, req, opts)
+				assertTask6PatchError(t, errExecute)
+			}
+			mu.Lock()
+			first, second := attempts["first"], attempts["second"]
+			mu.Unlock()
+			if first != 1 || second != 0 {
+				t.Fatalf("patch failure changed accounts: first=%d second=%d", first, second)
+			}
+			owner, errSelect := manager.SelectAuth(context.Background(), "claude", "claude-opus-5", opts)
+			if errSelect != nil || owner.ID != ids[0] {
+				t.Fatalf("patch failure changed durable ownership: %v, %v", owner, errSelect)
+			}
+		})
+	}
+}
