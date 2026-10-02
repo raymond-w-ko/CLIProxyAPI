@@ -75,9 +75,10 @@ native protocol. The proxy does not execute patches or edit files; the client
 still performs the tool call. The bridge validates argument encoding, call
 identity, and completion, not whether the patch itself is correct.
 
-The following commit, `63c04b4b`, makes catalog advertisement opt-in, including
-for native Codex models. To advertise the tool to clients that use
-`/v1/models?client_version=`, merge this into your configuration:
+Commit `d306f2c5` restores native template advertisement by default after
+`63c04b4b` had made all advertisement opt-in. To advertise the bridge for
+supported non-native models to clients that use `/v1/models?client_version=`,
+keep this setting enabled:
 
 ```yaml
 client:
@@ -85,15 +86,30 @@ client:
     enable-apply-patch: true
 ```
 
-The default is `false`, which clears `apply_patch_tool_type` in that catalog.
+The default is `false`, which retains `freeform` only where the model template
+already declares it (excluding image/video and other non-text entries).
 This is an advertisement switch, not a tool-execution or translation guard:
-explicitly supplied custom tool declarations can still use the bridge. Support
-is advertised only when every executor for the public model supports it.
+explicitly supplied custom tool declarations can still use the bridge. When
+enabled, advertisement requires every executor for the public model to support it.
 
 `optimize-multi-agent-v2` also moves to `client.codex.optimize-multi-agent-v2`.
 Legacy YAML paths migrate on load; the new path wins when both are present,
 including explicit `false`. The setting now applies to API-key and OAuth routes.
 These upstream settings do not change durable ownership or quota-only migration.
+
+## Upstream Claude continuity and refresh update
+
+Claude's injected date now stays fixed while its in-memory continuity entry
+survives, avoiding prompt-cache invalidation at midnight. This date is separate
+from durable account ownership: a restart, cache expiry, or account migration
+can establish a new date.
+
+An upstream 401 followed by an invalid refresh grant now keeps the credential
+unavailable instead of repeatedly retrying it. A new login or a successful
+explicit refresh is needed for recovery. Durable affinity still does not migrate
+on authentication failure alone. Claude refresh also stops replaying ambiguous
+transport or decoding failures because its single-use refresh token may already
+have been consumed.
 
 ## Recommended Docker Compose deployment
 
