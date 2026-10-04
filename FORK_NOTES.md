@@ -111,6 +111,15 @@ on authentication failure alone. Claude refresh also stops replaying ambiguous
 transport or decoding failures because its single-use refresh token may already
 have been consumed.
 
+## Upstream Antigravity catalog update
+
+The bundled Antigravity catalog replaces `claude-opus-4-6-thinking` and
+`claude-sonnet-4-6` with `claude-opus-5-5-high` and `claude-sonnet-5-5-high`.
+The replacement entries advertise a 1,000,000-token context and 128,000 maximum
+completion tokens. If your Antigravity routes or aliases still target the retired
+IDs, update them to the available replacement IDs. This catalog change does not
+rename direct Claude provider models or change durable account ownership.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
