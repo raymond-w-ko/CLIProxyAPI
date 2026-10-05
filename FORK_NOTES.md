@@ -113,12 +113,35 @@ have been consumed.
 
 ## Upstream Antigravity catalog update
 
-The bundled Antigravity catalog replaces `claude-opus-4-6-thinking` and
-`claude-sonnet-4-6` with `claude-opus-5-5-high` and `claude-sonnet-5-5-high`.
-The replacement entries advertise a 1,000,000-token context and 128,000 maximum
-completion tokens. If your Antigravity routes or aliases still target the retired
-IDs, update them to the available replacement IDs. This catalog change does not
-rename direct Claude provider models or change durable account ownership.
+The bundled Antigravity catalog includes `claude-opus-5-5-high` and
+`claude-sonnet-5-5-high`, advertising a 1,000,000-token context and 128,000 maximum
+completion tokens. Upstream subsequently restored `claude-opus-4-6-thinking` and
+`claude-sonnet-4-6`; the earlier advice to replace all 4.6 aliases is no longer
+required by the bundled catalog. Actual availability depends on the account's
+model entitlements. These changes do not rename direct Claude provider models
+or change durable account ownership.
+
+## Native Claude Code and Codex update
+
+The upstream changes through `a4acc9f7` affect native clients when they use this
+proxy, even without cross-provider translation:
+
+- Claude thread continuations reserve one cache breakpoint and retain OAuth tool
+  aliases. Missing thread state returns `thread_not_found` so a supporting client
+  can replay the full conversation. The alias cache is in memory and can be lost
+  on restart or eviction; durable account bindings remain separate and persistent.
+- Codex WebSocket activation now receives disconnect errors that previously could
+  be lost between connection setup and request activation.
+- Credential mutations and persistence are coordinated to avoid losing concurrent
+  updates. Successfully refreshed tokens are saved even if the request was canceled.
+- User payload rules now run after built-in request transformations. If you use
+  payload overrides or filters, review them: later built-in cleanup no longer
+  restores filtered fields or replaces explicitly configured values.
+
+No new setting is required for the recommended deployment. Optional
+`models.catalog`, `models.codex-catalog`, and `models.devin-catalog` accept custom
+catalog sources; leave them unset to retain the default sources. Clients that
+connect directly to their providers, bypassing this proxy, are unaffected.
 
 ## Recommended Docker Compose deployment
 
