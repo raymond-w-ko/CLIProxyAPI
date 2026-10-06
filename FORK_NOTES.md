@@ -143,6 +143,15 @@ No new setting is required for the recommended deployment. Optional
 catalog sources; leave them unset to retain the default sources. Clients that
 connect directly to their providers, bypassing this proxy, are unaffected.
 
+The follow-up through `a2976eb8` fixes sharing of Claude's tool alias cache across
+per-request executor copies; the cache remains in memory. Claude requests can
+also supply `"prompt_cache_options":{"mode":"explicit"}` to keep caller-owned
+cache markers and TTLs instead of automatic injection and TTL normalization.
+The proxy still enforces its cache-breakpoint limit and strips this proxy-only
+option before sending upstream. This is a request-body option, not a new YAML
+setting, and the recommended deployment does not need to enable it. Codex usage
+records now report reasoning effort after payload overrides are applied.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
