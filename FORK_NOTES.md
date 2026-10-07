@@ -152,6 +152,25 @@ option before sending upstream. This is a request-body option, not a new YAML
 setting, and the recommended deployment does not need to enable it. Codex usage
 records now report reasoning effort after payload overrides are applied.
 
+The update through `f3703e82` strengthens credential concurrency handling. Results
+from a superseded credential version or registration no longer change current
+availability or cooldowns, and an in-flight refresh cannot overwrite newer
+credentials. Refresh preserves already-recorded active quota cooldowns. Fork
+regressions verify that a stale quota response does not move durable ownership,
+while a confirmed model quota recorded before refresh still permits migration.
+
+Claude also recognizes missing thread state in plain-text and structured errors,
+and JSON errors are compacted for SSE delivery. Confirmed native Claude Code
+retains its passthrough system prompt. The caller system-prompt relocation changes
+apply to cloaked requests, including other clients routed through Claude OAuth;
+native Codex routed to Codex does not use that path. Grok speech endpoints and
+Gemini translation fixes do not affect native Claude/Codex routes.
+
+No configuration change is required. The new optional `server.github-token` is
+for the proxy's GitHub downloads and API requests, not model authentication or
+GHCR publication. Leave it unset unless those downloads need authentication;
+existing environment-token fallback remains supported.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

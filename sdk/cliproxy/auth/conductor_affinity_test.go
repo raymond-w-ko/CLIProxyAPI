@@ -592,3 +592,81 @@ func TestDurableAffinityModelQuotaDoesNotConfirmGenericDeadline(t *testing.T) {
 		t.Fatal("later generic response changed the confirmed window")
 	}
 }
+
+func TestDurableAffinityStaleQuotaAfterCredentialUpdateKeepsOwner(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	m, ids := durableTestManager(t, path)
+	opts := durableTestOptions()
+	opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+	before, errPick := durableTestPick(m, "model-one", opts)
+	if errPick != nil {
+		t.Fatal(errPick)
+	}
+	updated := before.Clone()
+	updated.Metadata = map[string]any{"access_token": "replacement-test-token"}
+	current, errUpdate := m.Update(context.Background(), updated)
+	if errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	if current.CredentialVersion <= before.CredentialVersion {
+		t.Fatal("credential replacement did not advance the version")
+	}
+	cooldown := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: before.ID, Provider: "claude", Model: "model-one",
+		CredentialVersion: before.CredentialVersion, RegistrationEpoch: before.RegistrationEpoch,
+		Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &cooldown})
+	if a, errPick := durableTestPick(m, "model-one", durableTestOptions()); errPick != nil || a.ID != ids[1] {
+		t.Fatalf("stale quota changed durable ownership: %v, %v", a, errPick)
+	}
+	restarted, _ := durableTestManager(t, path)
+	if a, errPick := durableTestPick(restarted, "model-two", durableTestOptions()); errPick != nil || a.ID != ids[1] {
+		t.Fatalf("stale quota changed persisted ownership: %v, %v", a, errPick)
+	}
+}
+
+func TestDurableAffinityRefreshPreservesConfirmedModelQuota(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, _, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+	t.Cleanup(selector.Stop)
+	m.SetSelector(selector)
+	opts := durableTestOptions()
+	owner, _, _, errPick := m.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil)
+	if errPick != nil || owner.ID != primary.ID {
+		t.Fatalf("initial owner = %v, %v", owner, errPick)
+	}
+	cooldown := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: primary.ID, Provider: "codex", Model: model,
+		CredentialVersion: owner.CredentialVersion, RegistrationEpoch: owner.RegistrationEpoch,
+		Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &cooldown})
+	before, _ := m.GetByID(primary.ID)
+	deadline := before.ModelStates[model].Quota.NextRecoverAt
+	// A concurrent 401 must not let successful refresh erase confirmed quota.
+	m.MarkResult(context.Background(), Result{AuthID: primary.ID, Provider: "codex", Model: model,
+		CredentialVersion: owner.CredentialVersion, RegistrationEpoch: owner.RegistrationEpoch,
+		Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}})
+	refreshed, errRefresh := m.ForceRefreshAuth(context.Background(), primary.ID)
+	if errRefresh != nil {
+		t.Fatal(errRefresh)
+	}
+	if refreshed.CredentialVersion <= owner.CredentialVersion {
+		t.Fatal("refresh did not replace the credential")
+	}
+	if reason, reset := m.durableOwnerExhaustion(primary.ID, model); reason != ErrorCodeModelQuota || !reset.Equal(deadline) {
+		t.Fatalf("refresh changed quota confirmation: %q, %v", reason, reset)
+	}
+	replacement, _, _, errPick := m.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil)
+	if errPick != nil || replacement.ID != backup.ID {
+		t.Fatalf("confirmed quota no longer permits migration: %v, %v", replacement, errPick)
+	}
+	store := loadDurableSessions(path)
+	if store.err != nil {
+		t.Fatal(store.err)
+	}
+	sessionID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if got := store.owner(durableSessionKey("codex", sessionID, opts)); got != backup.ID {
+		t.Fatalf("persisted replacement = %q, want %q", got, backup.ID)
+	}
+}

@@ -68,9 +68,12 @@ func TestServiceCatalogStartupAndConfigReload(t *testing.T) {
 		restoreCtx, restoreCancel := context.WithCancel(context.Background())
 		defer restoreCancel()
 		restoreCfg := *cfg
-		// Home disables Devin catalog loading, including during test cleanup.
 		restoreCfg.Home.Enabled = false
-		restoreCfg.Models.DevinCatalog = originalPath
+		restoreCfg.Models = config.ModelCatalogs{
+			Catalog:      fixture("models.json"),
+			CodexCatalog: fixture("codex_client_models.json"),
+			DevinCatalog: originalPath,
+		}
 		restore := &Service{cfg: &restoreCfg}
 		if string(registry.GetDevinModelsJSON()) != string(original) {
 			restore.startModelCatalogUpdaters(restoreCtx)
