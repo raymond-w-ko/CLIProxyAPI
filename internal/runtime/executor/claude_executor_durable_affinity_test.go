@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -232,6 +233,72 @@ func TestClaudeDurableAffinityApplyPatchFailureKeepsOwner(t *testing.T) {
 			owner, errSelect := manager.SelectAuth(context.Background(), "claude", "claude-opus-5", opts)
 			if errSelect != nil || owner.ID != ids[0] {
 				t.Fatalf("patch failure changed durable ownership: %v, %v", owner, errSelect)
+			}
+		})
+	}
+}
+
+func TestClaudeDurableAffinityUnsupportedAttachmentKeepsOwner(t *testing.T) {
+	for _, mode := range []string{"execute", "stream", "count"} {
+		t.Run(mode, func(t *testing.T) {
+			const model = "claude-sonnet-4-6"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("unsupported attachment reached upstream")
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			selector := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
+				File: path, Fallback: &cliproxyauth.FillFirstSelector{},
+			})
+			defer selector.Stop()
+			manager := cliproxyauth.NewManager(nil, selector, nil)
+			manager.SetRetryConfig(3, 30*time.Second, 0)
+			manager.RegisterExecutor(NewClaudeExecutor(&config.Config{}))
+			ids := []string{t.Name() + "-a", t.Name() + "-b"}
+			for _, id := range ids {
+				registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+				defer registry.GetGlobalRegistry().UnregisterClient(id)
+				if _, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), &cliproxyauth.Auth{
+					ID: id, Provider: "claude", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+				}); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+			}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Headers: http.Header{"X-Session-Id": {"stable"}}}
+			// Pin the second credential so a lost binding cannot pass via fill-first.
+			pinned := opts
+			pinned.Metadata = map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: ids[1]}
+			if owner, errSelect := manager.SelectAuth(context.Background(), "claude", model, pinned); errSelect != nil || owner.ID != ids[1] {
+				t.Fatalf("initial owner = %v, %v", owner, errSelect)
+			}
+			before, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-not-stored"}}]}]}`)}
+			var errExecute error
+			switch mode {
+			case "execute":
+				_, errExecute = manager.Execute(context.Background(), []string{"claude"}, req, opts)
+			case "stream":
+				_, errExecute = manager.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+			case "count":
+				_, errExecute = manager.ExecuteCount(context.Background(), []string{"claude"}, req, opts)
+			}
+			var status interface{ StatusCode() int }
+			if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("unsupported attachment returned %v, want 400", errExecute)
+			}
+			if owner, errSelect := manager.SelectAuth(context.Background(), "claude", model, opts); errSelect != nil || owner.ID != ids[1] {
+				t.Fatalf("translation failure cooled or changed owner: %v, %v", owner, errSelect)
+			}
+			after, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if string(before) != string(after) {
+				t.Fatal("translation failure changed persisted bindings")
 			}
 		})
 	}

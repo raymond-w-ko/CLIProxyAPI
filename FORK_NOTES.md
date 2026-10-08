@@ -171,6 +171,25 @@ for the proxy's GitHub downloads and API requests, not model authentication or
 GHCR publication. Leave it unset unless those downloads need authentication;
 existing environment-token fallback remains supported.
 
+The update through `0f96f568` improves attachment handling during protocol
+translation. Supported images and files retain more of their source content.
+When unsupported attachments would leave a user turn with nothing sendable, the
+proxy returns HTTP 400 before contacting the provider. If the same turn retains
+sendable text or other content, unsupported attachments can still be omitted.
+This is not a guarantee that every attachment reaches every provider. These
+request errors do not authorize account migration; fork regression coverage
+checks unchanged persisted ownership for execution, streaming, and token counting.
+Native Claude-to-Claude and Codex-to-Codex conversion behavior is unchanged, but
+cross-provider routes used by either client can encounter the new rejections.
+
+The service also starts a background Grok CLI version lookup against npm at
+startup and every three hours, even without an xAI credential. It uses the global
+outbound proxy setting and retains its cached/fallback version on failure. This
+does not change Claude or Codex request versions. No configuration change is
+required for this deployment. Embedded SDK users registering request translators
+must adapt to the new `([]byte, error)` return signature; HTTP clients need no
+such change.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
