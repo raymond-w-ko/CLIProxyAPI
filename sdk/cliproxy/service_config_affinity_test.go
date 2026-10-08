@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -101,4 +102,68 @@ func TestServiceDurableAffinityToggleAndRestart(t *testing.T) {
 	}
 	selectOwner(service, opts, "durable-b")
 	selectOwner(newService(), opts, "durable-b")
+}
+
+func TestServiceDurableAffinityBatchModelExclusionKeepsOwner(t *testing.T) {
+	ctx := coreauth.WithSkipPersist(context.Background())
+	path := filepath.Join(t.TempDir(), "session-bindings.json")
+	selector := coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+		File: path, Fallback: &coreauth.FillFirstSelector{},
+	})
+	t.Cleanup(selector.Stop)
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(mockBatchTestExecutor{provider: "codex"})
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	ids := []string{t.Name() + "-a", t.Name() + "-b"}
+	for _, id := range ids {
+		if _, errRegister := manager.Register(ctx, &coreauth.Auth{
+			ID: id, Provider: "codex", Status: coreauth.StatusActive,
+			Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro"},
+		}); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+		t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(id) })
+	}
+	service.registerModelsForAuthBatch(ctx, manager.List())
+	opts := cliproxyexecutor.Options{
+		Headers:  http.Header{"X-Session-Id": {"batch-session"}},
+		Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: ids[1]},
+	}
+	if owner, errSelect := manager.SelectAuth(ctx, "codex", "gpt-6-astra", opts); errSelect != nil || owner.ID != ids[1] {
+		t.Fatalf("initial owner = %v, %v", owner, errSelect)
+	}
+	delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+	before, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var changed atomic.Bool
+	modelRegistrationTaskPostRunHook = func(id string) {
+		if id != ids[1] || !changed.CompareAndSwap(false, true) {
+			return
+		}
+		current, _ := manager.GetByID(id)
+		current.Attributes["excluded_models"] = "gpt-6-astra"
+		if _, errUpdate := manager.Update(ctx, current); errUpdate != nil {
+			t.Errorf("exclude owner model: %v", errUpdate)
+		}
+	}
+	t.Cleanup(func() { modelRegistrationTaskPostRunHook = nil })
+	service.registerModelsForAuthBatch(ctx, manager.List())
+	if !changed.Load() || GlobalModelRegistry().ClientSupportsModel(ids[1], "gpt-6-astra") {
+		t.Fatal("batch did not apply the concurrent model exclusion")
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(ids[0], "gpt-6-astra") {
+		t.Fatal("backup must still support the excluded model")
+	}
+	if owner, errSelect := manager.SelectAuth(ctx, "codex", "gpt-6-astra", opts); errSelect == nil || owner != nil {
+		t.Fatalf("model exclusion must fail without migrating: %v, %v", owner, errSelect)
+	}
+	if owner, errSelect := manager.SelectAuth(ctx, "codex", "gpt-6.1-sol", opts); errSelect != nil || owner.ID != ids[1] {
+		t.Fatalf("batch changed ownership for a supported model: %v, %v", owner, errSelect)
+	}
+	after, errRead := os.ReadFile(path)
+	if errRead != nil || !bytes.Equal(before, after) {
+		t.Fatalf("batch reconciliation changed persisted bindings: %v", errRead)
+	}
 }

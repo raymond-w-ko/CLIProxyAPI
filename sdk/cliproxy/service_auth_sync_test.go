@@ -719,6 +719,7 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	bStarted := make(chan struct{})
 	bBlock := make(chan struct{})
+	finishedBatch := make(chan struct{})
 	var started atomic.Int32
 	modelRegistrationTaskHook = func() {
 		if started.Add(1) == 2 {
@@ -727,12 +728,13 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		}
 	}
 	t.Cleanup(func() {
-		modelRegistrationTaskHook = nil
 		select {
 		case <-bBlock:
 		default:
 			close(bBlock)
 		}
+		<-finishedBatch
+		modelRegistrationTaskHook = nil
 	})
 
 	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
@@ -740,7 +742,6 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	updateB := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authBID, Auth: authB}
 	updateB.SetRevision(1)
 
-	finishedBatch := make(chan struct{})
 	go func() {
 		defer close(finishedBatch)
 		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})
@@ -752,15 +753,33 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		t.Fatal("second auth registration in batch did not start")
 	}
 
-	doneA := make(chan struct{})
+	// Workers may start in either order. Select the completed account instead
+	// of assuming the second hook invocation belongs to B.
+	waitA := service.authRegistrationWaitCh(authAID)
+	waitB := service.authRegistrationWaitCh(authBID)
+	completedUpdate := updateA
+	switch {
+	case waitA == nil:
+	case waitB == nil:
+		completedUpdate = updateB
+	default:
+		select {
+		case <-waitA:
+		case <-waitB:
+			completedUpdate = updateB
+		case <-time.After(2 * time.Second):
+			t.Fatal("unblocked auth registration did not finish")
+		}
+	}
+	done := make(chan struct{})
 	go func() {
-		service.handleAuthUpdate(context.Background(), updateA)
-		close(doneA)
+		service.handleAuthUpdate(context.Background(), completedUpdate)
+		close(done)
 	}()
 	select {
-	case <-doneA:
+	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("auth A hook wait blocked on unrelated auth B registration")
+		t.Fatal("completed auth hook wait blocked on unrelated auth registration")
 	}
 
 	close(bBlock)

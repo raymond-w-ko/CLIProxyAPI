@@ -190,6 +190,19 @@ required for this deployment. Embedded SDK users registering request translators
 must adapt to the new `([]byte, error)` return signature; HTTP clients need no
 such change.
 
+The update through `54946fa3` reconciles account changes during batch model
+registration. Concurrent model exclusions now reach the registry and scheduler
+instead of being replaced by a stale snapshot. This applies to native Claude and
+Codex accounts too. Durable ownership still takes precedence: if the owner loses
+access to the requested model, the request fails rather than moving to another
+account without confirmed quota exhaustion. A fork regression covers this case
+and verifies that the persisted binding remains unchanged.
+
+Other changes add opt-in native Vertex Interactions routing, preserve foreign
+reasoning content on Meta routes, and normalize YAML collection formatting in
+config saves and the v8 config API. Native Claude/Codex request handling needs no
+configuration change; leave Vertex `interactions` unset unless using that API.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
