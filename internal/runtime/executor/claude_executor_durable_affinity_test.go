@@ -32,8 +32,8 @@ func (e durableClaudeTestExecutor) CountTokens(ctx context.Context, auth *clipro
 }
 
 func TestClaudeDurableAffinityModelQuota(t *testing.T) {
-	for _, mode := range []string{"execute", "stream", "count"} {
-		for _, scenario := range []string{"model quota", "both exhausted", "generic 429"} {
+	for _, mode := range []string{"execute", "stream", "count", "compact", "compact-stream"} {
+		for _, scenario := range []string{"model quota", "both exhausted", "generic 429", "overage billing", "model quota with billing"} {
 			t.Run(mode+"/"+scenario, func(t *testing.T) {
 				const model = "claude-fable-5-1"
 				var mu sync.Mutex
@@ -49,12 +49,19 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					if key == "first" || scenario == "both exhausted" {
 						if scenario == "generic 429" {
 							w.Header().Set("Retry-After", "3600")
-						} else {
+						} else if scenario != "overage billing" {
 							w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 							w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
 							w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
 							w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
 							w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+						}
+						if scenario == "overage billing" || scenario == "model quota with billing" {
+							billingReset := strconv.FormatInt(time.Now().Add(31*24*time.Hour).Unix(), 10)
+							w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+							w.Header().Set("Anthropic-Ratelimit-Unified-Representative-Claim", "overage")
+							w.Header().Set("Anthropic-Ratelimit-Unified-Reset", billingReset)
+							w.Header().Set("Anthropic-Ratelimit-Unified-Overage-Reset", billingReset)
 						}
 						w.WriteHeader(http.StatusTooManyRequests)
 						_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit."}}`)
@@ -76,6 +83,10 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 				defer selector.Stop()
 				manager := cliproxyauth.NewManager(nil, selector, nil)
 				manager.SetRetryConfig(3, 30*time.Second, 0)
+				if scenario == "overage billing" {
+					// Exercise one rejection without waiting through generic backoff.
+					manager.SetRetryConfig(0, 0, 0)
+				}
 				manager.RegisterExecutor(durableClaudeTestExecutor{NewClaudeExecutor(&config.Config{})})
 				ids := []string{t.Name() + "-a", t.Name() + "-b"}
 				for i, key := range []string{"first", "second"} {
@@ -91,9 +102,14 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 				}
 				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"stable"}}}
 				req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"claude-fable-5-1","messages":[{"role":"user","content":"test"}],"max_tokens":16}`)}
+				if mode == "compact" || mode == "compact-stream" {
+					opts.SourceFormat = sdktranslator.FormatOpenAIResponse
+					opts.Alt = "responses/compact"
+					req.Payload = []byte(`{"model":"claude-fable-5-1","input":"Summarize this test conversation."}`)
+				}
 				invoke := func() error {
 					switch mode {
-					case "stream":
+					case "stream", "compact-stream":
 						stream, errStream := manager.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
 						if errStream != nil {
 							return errStream
@@ -113,7 +129,7 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					}
 				}
 				errExecute := invoke()
-				if scenario == "model quota" {
+				if scenario == "model quota" || scenario == "model quota with billing" {
 					if errExecute != nil {
 						t.Fatal(errExecute)
 					}
@@ -123,19 +139,28 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 						t.Fatalf("expected terminal 429, got %v", errExecute)
 					}
 					// Repeated client requests during cooldown must not send more upstream traffic.
-					if errAgain := invoke(); errAgain == nil {
-						t.Fatal("expected cooldown rejection")
+					if scenario != "overage billing" {
+						if errAgain := invoke(); errAgain == nil {
+							t.Fatal("expected cooldown rejection")
+						}
 					}
 				}
 				mu.Lock()
 				first, second := attempts["first"], attempts["second"]
 				mu.Unlock()
 				wantSecond := 1
-				if scenario == "generic 429" {
+				if scenario == "generic 429" || scenario == "overage billing" {
 					wantSecond = 0
 				}
 				if first != 1 || second != wantSecond {
 					t.Fatalf("upstream attempts: first=%d second=%d; want 1 and %d", first, second, wantSecond)
+				}
+				if scenario == "overage billing" || scenario == "model quota with billing" {
+					failed, _ := manager.GetByID(ids[0])
+					state := failed.ModelStates[model]
+					if state == nil || state.NextRetryAfter.After(time.Now().Add(2*time.Hour)) {
+						t.Fatalf("billing reset became a long cooldown: %+v", state)
+					}
 				}
 				// No account-wide cooldown: a healthy sibling model keeps the current owner.
 				owner, errSelect := manager.SelectAuth(context.Background(), "claude", "claude-opus-5", opts)

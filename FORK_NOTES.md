@@ -203,6 +203,29 @@ reasoning content on Meta routes, and normalize YAML collection formatting in
 config saves and the v8 config API. Native Claude/Codex request handling needs no
 configuration change; leave Vertex `interactions` unset unless using that API.
 
+The update through `67465884` ignores overage billing boundaries when calculating
+Claude rate-limit recovery. A rejected overage claim with absent, unexhausted
+shared windows no longer counts as account-wide quota exhaustion. Explicit
+`7d_oi` model rejection still permits this fork's model-quota migration and uses
+its applicable reset deadline. Reset candidates beyond seven days plus one hour
+are discarded. Existing persisted cooldowns are not rewritten by this parser
+change. Regression tests cover billing-only rejection and model rejection with a
+billing reset across execution, streaming, token counting, and compaction.
+
+Codex WebSocket clients can now send `response.interrupt` during a response. The
+proxy forwards it to the active Codex socket without selecting another account;
+HTTP-backed turns use local cancellation. An interrupted response can be followed
+by another turn on the same downstream connection.
+
+Claude routes now support Responses compaction, including `/responses/compact`,
+using a generated summary in a proxy-specific capsule. This mainly affects Codex
+or other Responses clients routed to Claude, not native Claude Messages requests.
+Foreign compaction capsules are dropped with a warning rather than decoded, so
+do not rely on native Codex compaction capsules carrying context into Claude.
+For Responses requests without an output limit, registered non-Fable Claude
+models now use the registry completion limit; Fable retains its conservative cap.
+No configuration change is required for the recommended deployment.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
