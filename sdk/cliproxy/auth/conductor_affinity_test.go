@@ -308,6 +308,81 @@ func TestDurableAffinityTransportRetryUsesSameOwner(t *testing.T) {
 	}
 }
 
+type durableModelQuotaError struct{ customStatusError }
+
+func (durableModelQuotaError) IsModelQuotaExhausted() bool { return true }
+
+func TestDurableAffinityCanceledStreamQuotaPolicy(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	cooldown := time.Hour
+	for _, tc := range []struct {
+		name    string
+		err     error
+		migrate bool
+	}{
+		{"credential quota", streamQuotaError{customStatusError: customStatusError{code: 429, msg: "quota", retryAfter: &cooldown}, credentialScoped: true}, true},
+		{"model quota", durableModelQuotaError{customStatusError{code: 429, msg: "model quota", retryAfter: &cooldown}}, true},
+		{"generic 429", customStatusError{code: 429, msg: "rate limit", retryAfter: &cooldown}, false},
+		{"temporary error", customStatusError{code: 503, msg: "unavailable", retryAfter: &cooldown}, false},
+		{"client cancellation", context.Canceled, false},
+	} {
+		for _, bootstrap := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/bootstrap=%t", tc.name, bootstrap), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "bindings.json")
+				m, ids := durableTestManager(t, path)
+				m.SetRetryConfig(0, 0, 0)
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				attempts := 0
+				m.RegisterExecutor(&customStreamMockExecutor{
+					identifier: "claude",
+					streamFn: func(_ context.Context, selected *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+						attempts++
+						if selected.ID != ids[0] {
+							t.Fatalf("canceled request dispatched to replacement %s", selected.ID)
+						}
+						cancel()
+						if !bootstrap {
+							return nil, tc.err
+						}
+						chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+						chunks <- cliproxyexecutor.StreamChunk{Err: tc.err}
+						close(chunks)
+						return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+					},
+				})
+				opts := durableTestOptions()
+				_, errStream := m.ExecuteStream(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: "model-one"}, opts)
+				if !errors.Is(errStream, context.Canceled) || attempts != 1 {
+					t.Fatalf("canceled stream: attempts=%d error=%v", attempts, errStream)
+				}
+				sessionID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+				key := durableSessionKey("claude", sessionID, opts)
+				store := loadDurableSessions(path)
+				if store.err != nil || store.owner(key) != ids[0] {
+					t.Fatalf("cancellation changed persisted owner: owner=%s error=%v", store.owner(key), store.err)
+				}
+				selected, errPick := durableTestPick(m, "model-one", durableTestOptions())
+				wantOwner := ids[0]
+				if tc.migrate {
+					wantOwner = ids[1]
+					if errPick != nil || selected == nil || selected.ID != wantOwner {
+						t.Fatalf("confirmed quota did not permit next-request migration: %v, %v", selected, errPick)
+					}
+				} else if selected != nil && selected.ID != wantOwner {
+					t.Fatalf("unconfirmed failure migrated: %v, %v", selected, errPick)
+				}
+				// With fresh credentials, a restart must retain the selected owner.
+				restarted, _ := durableTestManager(t, path)
+				selected, errPick = durableTestPick(restarted, "model-one", durableTestOptions())
+				if errPick != nil || selected == nil || selected.ID != wantOwner {
+					t.Fatalf("restart owner=%v error=%v, want %s", selected, errPick, wantOwner)
+				}
+			})
+		}
+	}
+}
+
 func TestDurableAffinityCallerIsolationAndChildInheritance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bindings.json")
 	m, ids := durableTestManager(t, path)

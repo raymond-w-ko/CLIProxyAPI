@@ -246,6 +246,25 @@ because Home owns that decision; ordinary proxy routing retains its existing
 filtering and this fork's durable quota-only migration. Home remains unsupported
 with durable affinity. No configuration change is required for this deployment.
 
+The update through `3de4e248` preserves upstream cooldown errors when stream
+failure and request cancellation happen together. Codex WebSocket errors reach
+the conductor before disconnect notification closes the downstream connection.
+The canceled request still stops; a later request can migrate only if the saved
+error confirms account-wide or requested-model quota exhaustion. A generic 429
+with `Retry-After`, a temporary error, or client cancellation alone still cannot
+authorize migration. Fork regressions cover direct stream errors and bootstrap
+error chunks, including persisted ownership after restart.
+
+Claude cache handling now ignores null and invalid cache-control entries when
+counting breakpoints, inserting automatic markers, and normalizing TTL order.
+This does not guarantee removal of every invalid caller-supplied value. Codex's
+Chat Completions translation shortens tool-call IDs longer than 64 bytes while
+keeping calls and results matched; native Codex Responses requests do not use
+that translation. Usage records now include the downstream authentication
+provider and whether it is a built-in API key. These fields describe client
+authentication, not the upstream Claude/Codex account or durable owner. No new
+configuration is required for the recommended deployment.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
