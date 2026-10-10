@@ -226,6 +226,26 @@ For Responses requests without an output limit, registered non-Fable Claude
 models now use the registry completion limit; Fable retains its conservative cap.
 No configuration change is required for the recommended deployment.
 
+The update through `d318bcc3` makes late Codex WebSocket interrupts harmless when
+their response has already finished on the retained upstream connection. They no
+longer leave an error for the next turn or interrupt a newer response. Active
+interrupts still use the current connection without selecting another account.
+Interrupt timeline diagnostics record a hashed response ID and outcome instead
+of arbitrary control-frame fields.
+
+Claude system-prompt insertion now preserves directive-only effort changes
+between user turns. Claude also repairs non-portable tool-call IDs consistently
+across calls and results before user payload rules run; valid native IDs remain
+unchanged. This mainly helps conversations replayed from other providers. When
+Claude Code uses an OpenAI-compatible backend, final streamed usage now waits
+for the trailing usage chunk or `[DONE]`, retaining authoritative cache counts.
+
+Direct OpenAI image routes now preserve the resolved upstream model name,
+including configured aliases. Home dispatch skips local availability filtering
+because Home owns that decision; ordinary proxy routing retains its existing
+filtering and this fork's durable quota-only migration. Home remains unsupported
+with durable affinity. No configuration change is required for this deployment.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
