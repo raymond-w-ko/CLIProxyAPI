@@ -265,6 +265,13 @@ provider and whether it is a built-in API key. These fields describe client
 authentication, not the upstream Claude/Codex account or durable owner. No new
 configuration is required for the recommended deployment.
 
+The update through `f1d4a94e` makes global model metadata lookup use the active
+Devin and Meta catalog getters. Devin lookup now follows refreshed catalog
+metadata instead of reviving models from an inactive fallback catalog. Native
+Claude/Codex catalog entries and durable affinity are unchanged. The remaining
+upstream changes update sponsorship documentation; no configuration change is
+required.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
