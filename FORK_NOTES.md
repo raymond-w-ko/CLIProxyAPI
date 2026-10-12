@@ -411,6 +411,22 @@ Each successful build publishes `latest` and `sha-<full Git commit SHA>`. Pin th
 commit tag or the digest from the run summary when you want controlled updates.
 Builds are serialized, and Docker layers are cached in GitHub Actions.
 
+After a successful publication, the same workflow keeps the build tagged `latest`
+and the two newest previous builds by creation time. Cleanup enumerates all GHCR
+version pages and preserves every manifest referenced by these builds, including
+platform images and attestations. GHCR may therefore show more than three package
+versions even though only three usable builds remain. Unreferenced versions are
+deleted. An unreadable retained manifest, unexpected tag, or mismatched `latest`
+digest stops cleanup before deletion; API failures fail the workflow visibly.
+
+Older commit tags and digests are no longer available for fresh pulls after
+cleanup. Already-running containers and locally cached images are unaffected.
+There is no age grace period or deployment-pin exemption. Keep a separate image
+copy if you need a rollback older than these three builds. The workflow uses its
+temporary token and needs package admin access for deletion (normally granted to
+the repository that publishes the package). Keep this workflow as the package's
+only publisher so its existing concurrency group also serializes cleanup.
+
 The six inherited workflows are disabled individually in this fork's GitHub
 settings: `agents-md-guard`, `auto-retarget-main-pr-to-dev`, `docker-image`,
 `translator-path-guard`, `pr-test-build`, and `release`. Their source files remain

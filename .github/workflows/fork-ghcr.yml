@@ -42,6 +42,9 @@ jobs:
         run: |
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      - name: Test image retention policy
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
+
       - name: Build and publish x86_64 image
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -74,3 +77,9 @@ jobs:
             echo "Commit tag: \`$IMAGE:sha-$GITHUB_SHA\`"
             echo "Digest: \`$IMAGE@$IMAGE_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep latest three builds
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: python3 .github/scripts/ghcr_cleanup.py
