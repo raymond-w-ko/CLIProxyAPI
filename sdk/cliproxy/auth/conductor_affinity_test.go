@@ -18,7 +18,12 @@ import (
 
 func durableTestManager(t *testing.T, path string) (*Manager, []string) {
 	t.Helper()
-	s := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+	return durableTestManagerWithRebindOn(t, path, "")
+}
+
+func durableTestManagerWithRebindOn(t *testing.T, path, rebindOn string) (*Manager, []string) {
+	t.Helper()
+	s := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}, RebindOn: rebindOn})
 	t.Cleanup(s.Stop)
 	m := NewManager(nil, s, nil)
 	m.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
@@ -76,46 +81,50 @@ func TestDurableAffinityRestartModelsAndReload(t *testing.T) {
 
 func TestDurableAffinityFailurePolicy(t *testing.T) {
 	withQuotaCooldownEnabled(t)
-	for _, tc := range []struct {
-		name    string
-		code    int
-		scope   bool
-		migrate bool
-	}{
-		{"transient", 503, false, false},
-		{"unauthorized", 401, false, false},
-		{"temporary rate limit", 429, false, false},
-		{"confirmed quota", 429, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
-			opts := durableTestOptions()
-			if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
-				t.Fatal(errPick)
-			}
-			cooldown := time.Hour
-			m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Options: opts,
-				Error: &Error{HTTPStatus: tc.code, Message: tc.name}, CredentialScope: tc.scope, RetryAfter: &cooldown})
-			// The tried set must not allow ordinary errors to escape the durable owner.
-			a, _, _, errPick := m.pickNextMixed(context.Background(), []string{"claude"}, "model-one", opts, map[string]struct{}{ids[0]: {}})
-			if tc.migrate {
-				if errPick != nil || a.ID != ids[1] {
-					t.Fatalf("quota migration = %v, %v", a, errPick)
-				}
-				m.mu.Lock()
-				m.auths[ids[0]].Quota = QuotaState{}
-				m.auths[ids[0]].Unavailable = false
-				m.auths[ids[0]].NextRetryAfter = time.Time{}
-				m.auths[ids[0]].ModelStates = nil
-				m.mu.Unlock()
-				// A late successful result from A cannot reclaim a binding now owned by B.
-				m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-two", Success: true, Options: opts})
-				a, errPick = durableTestPick(m, "model-two", opts)
-				if errPick != nil || a.ID != ids[1] {
-					t.Fatalf("recovered account reclaimed session: %v, %v", a, errPick)
-				}
-			} else if errPick == nil || a != nil {
-				t.Fatalf("temporary failure migrated: %v, %v", a, errPick)
+	for _, rebindOn := range []string{SessionAffinityRebindOnAny, SessionAffinityRebindOnQuota} {
+		t.Run(rebindOn, func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				code    int
+				scope   bool
+				migrate bool
+			}{
+				{"transient", 503, false, false},
+				{"unauthorized", 401, false, false},
+				{"temporary rate limit", 429, false, false},
+				{"confirmed quota", 429, true, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					m, ids := durableTestManagerWithRebindOn(t, filepath.Join(t.TempDir(), "bindings.json"), rebindOn)
+					opts := durableTestOptions()
+					if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+						t.Fatal(errPick)
+					}
+					cooldown := time.Hour
+					m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Options: opts,
+						Error: &Error{HTTPStatus: tc.code, Message: tc.name}, CredentialScope: tc.scope, RetryAfter: &cooldown})
+					// The tried set must not allow ordinary errors to escape the durable owner.
+					a, _, _, errPick := m.pickNextMixed(context.Background(), []string{"claude"}, "model-one", opts, map[string]struct{}{ids[0]: {}})
+					if tc.migrate {
+						if errPick != nil || a.ID != ids[1] {
+							t.Fatalf("quota migration = %v, %v", a, errPick)
+						}
+						m.mu.Lock()
+						m.auths[ids[0]].Quota = QuotaState{}
+						m.auths[ids[0]].Unavailable = false
+						m.auths[ids[0]].NextRetryAfter = time.Time{}
+						m.auths[ids[0]].ModelStates = nil
+						m.mu.Unlock()
+						// A late successful result from A cannot reclaim a binding now owned by B.
+						m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-two", Success: true, Options: opts})
+						a, errPick = durableTestPick(m, "model-two", opts)
+						if errPick != nil || a.ID != ids[1] {
+							t.Fatalf("recovered account reclaimed session: %v, %v", a, errPick)
+						}
+					} else if errPick == nil || a != nil {
+						t.Fatalf("temporary failure migrated: %v, %v", a, errPick)
+					}
+				})
 			}
 		})
 	}
@@ -256,44 +265,48 @@ func (e *durableTestExecutor) ExecuteStream(ctx context.Context, a *Auth, r clip
 
 func TestDurableAffinityExecutionPaths(t *testing.T) {
 	withQuotaCooldownEnabled(t)
-	for _, mode := range []string{"execute", "count", "stream"} {
-		for _, quota := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/quota=%t", mode, quota), func(t *testing.T) {
-				m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
-				m.SetRetryConfig(2, time.Second, 0)
-				cooldown := time.Hour
-				e := &durableTestExecutor{schedulerTestExecutor: schedulerTestExecutor{provider: "claude"}, failure: streamQuotaError{
-					customStatusError: customStatusError{code: 429, msg: "rate limit", retryAfter: &cooldown}, credentialScoped: quota,
-				}}
-				m.RegisterExecutor(e)
-				opts := durableTestOptions()
-				r := cliproxyexecutor.Request{Model: "model-one"}
-				var errExec error
-				switch mode {
-				case "execute":
-					_, errExec = m.Execute(context.Background(), []string{"claude"}, r, opts)
-				case "count":
-					_, errExec = m.ExecuteCount(context.Background(), []string{"claude"}, r, opts)
-				case "stream":
-					var stream *cliproxyexecutor.StreamResult
-					stream, errExec = m.ExecuteStream(context.Background(), []string{"claude"}, r, opts)
-					if stream != nil {
-						for chunk := range stream.Chunks {
-							if chunk.Err != nil {
-								errExec = chunk.Err
+	for _, rebindOn := range []string{SessionAffinityRebindOnAny, SessionAffinityRebindOnQuota} {
+		t.Run(rebindOn, func(t *testing.T) {
+			for _, mode := range []string{"execute", "count", "stream"} {
+				for _, quota := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/quota=%t", mode, quota), func(t *testing.T) {
+						m, ids := durableTestManagerWithRebindOn(t, filepath.Join(t.TempDir(), "bindings.json"), rebindOn)
+						m.SetRetryConfig(2, time.Second, 0)
+						cooldown := time.Hour
+						e := &durableTestExecutor{schedulerTestExecutor: schedulerTestExecutor{provider: "claude"}, failure: streamQuotaError{
+							customStatusError: customStatusError{code: 429, msg: "rate limit", retryAfter: &cooldown}, credentialScoped: quota,
+						}}
+						m.RegisterExecutor(e)
+						opts := durableTestOptions()
+						r := cliproxyexecutor.Request{Model: "model-one"}
+						var errExec error
+						switch mode {
+						case "execute":
+							_, errExec = m.Execute(context.Background(), []string{"claude"}, r, opts)
+						case "count":
+							_, errExec = m.ExecuteCount(context.Background(), []string{"claude"}, r, opts)
+						case "stream":
+							var stream *cliproxyexecutor.StreamResult
+							stream, errExec = m.ExecuteStream(context.Background(), []string{"claude"}, r, opts)
+							if stream != nil {
+								for chunk := range stream.Chunks {
+									if chunk.Err != nil {
+										errExec = chunk.Err
+									}
+								}
 							}
 						}
-					}
+						if quota {
+							if errExec != nil || len(e.attempts) != 2 || e.attempts[0] != ids[0] || e.attempts[1] != ids[1] {
+								t.Fatalf("quota attempts=%v error=%v", e.attempts, errExec)
+							}
+						} else if errExec == nil || len(e.attempts) != 1 {
+							t.Fatalf("temporary limit bypassed owner cooldown: attempts=%v error=%v", e.attempts, errExec)
+						}
+					})
 				}
-				if quota {
-					if errExec != nil || len(e.attempts) != 2 || e.attempts[0] != ids[0] || e.attempts[1] != ids[1] {
-						t.Fatalf("quota attempts=%v error=%v", e.attempts, errExec)
-					}
-				} else if errExec == nil || len(e.attempts) != 1 {
-					t.Fatalf("temporary limit bypassed owner cooldown: attempts=%v error=%v", e.attempts, errExec)
-				}
-			})
-		}
+			}
+		})
 	}
 }
 

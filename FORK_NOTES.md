@@ -294,6 +294,45 @@ also fix trailing reasoning-only turns and tool results containing media.
 For the recommended native Claude/Codex deployment, no configuration change or
 immediate upgrade is needed for these features.
 
+## Upstream Codex lifecycle and affinity update
+
+The merge through `bf934162` preserves live Codex WebSocket sessions when config
+reloads replace an executor sharing the same session store. Removing a credential
+closes only that credential's sessions. Existing connections retain their original
+configuration; new connections use the updated configuration. Codex credential
+refresh and persistence now use file locks, atomic writes, and token-aware merges
+to avoid overwriting newer credentials during concurrent saves.
+
+Upstream adds `routing.session-affinity-rebind-on` (`any` by default, or `quota`).
+Neither value relaxes this fork's durable ownership policy. Upstream's memory-only
+`quota` mode permits temporary execution on another account and rebinding for
+several authentication and availability errors. The fork still permits migration
+only for confirmed account or requested-model quota exhaustion. Regression tests
+cover both settings, including execution, token counting, and streaming. No new
+affinity setting is required for this deployment.
+
+The model registry now recognizes `credential_quota` alongside model quota when
+calculating availability. Exhausted credentials no longer make an otherwise known
+model disappear from the catalog solely because all its credentials are cooling.
+
+Other additions remain opt-in:
+
+- Sign in with ChatGPT (SIWC) uses a separate nested token partition and requires
+  explicit `use_siwc` activation. Existing Codex credentials retain their normal
+  endpoint unless enabled. The shared credential persistence improvements still
+  apply to ordinary Codex credentials.
+- `server.max-request-body-bytes` defaults to `0` (disabled). A positive value
+  rejects oversized request bodies with HTTP 413.
+- `requests.streaming.send-keepalive-before-ft` defaults to `false` and requires
+  a positive `keepalive-seconds`. Enabling it can send SSE heartbeats before the
+  upstream response starts. The first heartbeat commits HTTP 200, so later errors
+  must travel inside the stream rather than changing the HTTP status.
+
+Plugin quota/auth changes and Gemini schema cleanup do not require changes for
+native Claude Code and Codex use without plugins. Keep the new optional features
+at their defaults unless needed. This update is useful for Codex reload and token
+reliability, but does not require an urgent deployment or a config migration.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
