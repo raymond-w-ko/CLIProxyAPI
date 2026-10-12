@@ -272,6 +272,28 @@ Claude/Codex catalog entries and durable affinity are unchanged. The remaining
 upstream changes update sponsorship documentation; no configuration change is
 required.
 
+The update through `091ff27f` adds optional Codex client tool search on Claude
+Responses routes. `upstream.claude.tool-search` defaults to `false`; leave it
+unset for native Claude Code-to-Claude and Codex-to-Codex use. Enable it only
+when using Codex with Claude and wanting client-executed deferred tool discovery.
+Official Anthropic credentials qualify automatically for supported models when
+enabled. Custom Claude API-key endpoints require `native-tool-search: true` on
+the key to opt in; legacy Claude models remain excluded.
+Unsupported endpoints use the earlier translation, which drops tool-search
+history rather than running search elsewhere. The Codex catalog advertises
+support only when every serving credential qualifies. The setting is pinned for
+each request so config reloads cannot change translation midway through it.
+
+Antigravity now persists model and web-search capability hints in auth metadata
+and reuses them after restart while refreshing them in the background. These
+hints are separate from durable session bindings. Shared credential persistence
+now lets foreground credential saves preempt background hint saves; a fork
+regression verifies that a quota result arriving during metadata persistence
+still permits migration only for confirmed model exhaustion. Gemini/Antigravity
+also fix trailing reasoning-only turns and tool results containing media.
+For the recommended native Claude/Codex deployment, no configuration change or
+immediate upgrade is needed for these features.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

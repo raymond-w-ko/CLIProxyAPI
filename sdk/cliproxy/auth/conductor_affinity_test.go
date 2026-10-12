@@ -582,6 +582,81 @@ func TestDurableAffinityModelQuotaScopeAndPersistence(t *testing.T) {
 	}
 }
 
+type durableMetadataBlockingStore struct {
+	callbackAuthStore
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (s *durableMetadataBlockingStore) Save(ctx context.Context, _ *Auth) (string, error) {
+	var err error
+	s.once.Do(func() {
+		close(s.entered)
+		<-ctx.Done()
+		err = ctx.Err()
+	})
+	return "", err
+}
+
+func TestDurableAffinityMetadataSavePreservesConcurrentQuota(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, confirmed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("confirmed=%t", confirmed), func(t *testing.T) {
+			m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
+			opts := durableTestOptions()
+			owner, errPick := durableTestPick(m, "model-one", opts)
+			if errPick != nil {
+				t.Fatal(errPick)
+			}
+			quotaErr := &Error{HTTPStatus: 429, Message: "rate limit"}
+			if confirmed {
+				quotaErr.Code = ErrorCodeModelQuota
+			}
+			cooldown := time.Hour
+			store := &durableMetadataBlockingStore{entered: make(chan struct{})}
+			m.SetStore(store)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan [2]bool, 1)
+			go func() {
+				ok, preempted := m.PersistMetadataEntry(ctx, owner.ID, owner.RegistrationEpoch, "capability_hint", true, nil)
+				done <- [2]bool{ok, preempted}
+			}()
+			select {
+			case <-store.entered:
+			case <-ctx.Done():
+				t.Fatal("metadata save did not enter store")
+			}
+			// A foreground quota result must preempt the blocked metadata save.
+			m.MarkResult(ctx, Result{AuthID: owner.ID, Provider: "claude", Model: "model-one",
+				Error: quotaErr, RetryAfter: &cooldown, CredentialVersion: owner.CredentialVersion, RegistrationEpoch: owner.RegistrationEpoch})
+			if result := <-done; result != [2]bool{false, true} {
+				t.Fatalf("metadata save was not preempted: %v", result)
+			}
+			ok, preempted := m.PersistMetadataEntry(ctx, owner.ID, owner.RegistrationEpoch, "capability_hint", true, nil)
+			m.SetStore(nil)
+			if !ok || preempted {
+				t.Fatalf("metadata retry: ok=%t preempted=%t", ok, preempted)
+			}
+			current, _ := m.GetByID(owner.ID)
+			if current.Metadata["capability_hint"] != true || current.RegistrationEpoch != owner.RegistrationEpoch || current.CredentialVersion != owner.CredentialVersion {
+				t.Fatal("metadata save lost its value or changed credential identity")
+			}
+			if sibling, errSibling := durableTestPick(m, "model-two", opts); errSibling != nil || sibling.ID != ids[0] {
+				t.Fatalf("metadata save changed sibling owner: %v, %v", sibling, errSibling)
+			}
+			selected, errPick := durableTestPick(m, "model-one", opts)
+			if confirmed {
+				if errPick != nil || selected == nil || selected.ID != ids[1] {
+					t.Fatalf("metadata save lost confirmed model quota: %v, %v", selected, errPick)
+				}
+			} else if errPick == nil || selected != nil {
+				t.Fatalf("metadata save bypassed generic cooldown: %v, %v", selected, errPick)
+			}
+		})
+	}
+}
+
 func TestDurableAffinityExpiredModelQuotaKeepsOwner(t *testing.T) {
 	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
 	opts := durableTestOptions()
