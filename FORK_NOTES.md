@@ -333,6 +333,46 @@ native Claude Code and Codex use without plugins. Keep the new optional features
 at their defaults unless needed. This update is useful for Codex reload and token
 reliability, but does not require an urgent deployment or a config migration.
 
+## Upstream reload, streaming, and model update
+
+The merge through `0d18d3b3` includes 28 upstream commits. The most relevant
+changes for native Claude Code and Codex use are:
+
+- Config snapshots and synchronized access reduce races during startup, model
+  registration, request handling, and hot reload. Durable binding paths and
+  quota-only ownership remain unchanged.
+- HTTP/2 closed-connection errors now use the existing bounded transport retry
+  path without cooling an otherwise healthy credential. A fork regression checks
+  that these retries stay on the durable owner.
+- The Codex HTTP executor assembles SSE events split over multiple `data:` lines,
+  including completion events, while preserving its bootstrap buffering limits.
+  Native upstream WebSocket frames do not use this SSE parser.
+- Codex tool-schema normalization removes integer bounds outside signed 64-bit
+  range that can cause upstream HTTP 500 responses. User payload rules remain
+  the final semantic step.
+- Claude OAuth tool-name recovery recognizes caller-owned MCP tools that the
+  model wraps with another MCP prefix. The model catalog adds Haiku 5.5.
+
+Cross-provider changes include Gemini client-side tool search, better union
+schema handling, Kimi namespaced tools, and unique fallback Responses item IDs.
+Claude Chat Completions now uses model-specific default output limits, and
+configured default token limits can override translator-generated defaults.
+Native Claude Messages requests retain their existing behavior. Catalog updates
+also add Gemini 4 Argon and Muse Wonder entries and remove older Gemini entries.
+The new request-scoped HTTP transport decorator is an SDK hook; the standalone
+proxy does not enable it automatically. No config migration is required.
+
+Validation also exposed three small existing concurrency defects fixed in this
+merge: a config write during reload could be incorrectly marked as already
+loaded; streaming log finalization could clear the worker's queue before it read
+pending chunks; and a late WebSocket interrupt could incorrectly enter local HTTP
+cancellation handling. Regression coverage preserves pending config writes,
+drains logs before closing, and keeps HTTP cancellation separate from duplex
+WebSocket handling. Tests using removed Gemini models now use current entries.
+
+The fork's GHCR workflow still retains the latest build and two previous builds,
+including their referenced manifests. Inherited upstream workflows stay disabled.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

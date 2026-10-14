@@ -311,13 +311,24 @@ func TestDurableAffinityExecutionPaths(t *testing.T) {
 }
 
 func TestDurableAffinityTransportRetryUsesSameOwner(t *testing.T) {
-	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
-	m.SetRetryConfig(1, 0, 0)
-	e := &durableTestExecutor{schedulerTestExecutor: schedulerTestExecutor{provider: "claude"}, failure: dialRefusedError()}
-	m.RegisterExecutor(e)
-	_, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "model-one"}, durableTestOptions())
-	if errExec != nil || len(e.attempts) != 2 || e.attempts[0] != ids[0] || e.attempts[1] != ids[0] {
-		t.Fatalf("same-account retry: attempts=%v error=%v", e.attempts, errExec)
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"dial refused", dialRefusedError()},
+		{"http2 force closed", errors.New("http2: client connection force closed via ClientConn.Close")},
+		{"http2 conn closed", errors.New("http2: client conn is closed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
+			m.SetRetryConfig(1, 0, 0)
+			e := &durableTestExecutor{schedulerTestExecutor: schedulerTestExecutor{provider: "claude"}, failure: tc.err}
+			m.RegisterExecutor(e)
+			_, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "model-one"}, durableTestOptions())
+			if errExec != nil || len(e.attempts) != 2 || e.attempts[0] != ids[0] || e.attempts[1] != ids[0] {
+				t.Fatalf("same-account retry: attempts=%v error=%v", e.attempts, errExec)
+			}
+		})
 	}
 }
 

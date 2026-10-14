@@ -306,13 +306,14 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if w.isStreaming && w.streamWriter != nil {
 		if w.chunkChannel != nil {
 			close(w.chunkChannel)
-			w.chunkChannel = nil
 		}
 
 		if w.streamDone != nil {
 			<-w.streamDone
 			w.streamDone = nil
 		}
+		// The worker may not have read the channel yet when Finalize starts.
+		w.chunkChannel = nil
 
 		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
 

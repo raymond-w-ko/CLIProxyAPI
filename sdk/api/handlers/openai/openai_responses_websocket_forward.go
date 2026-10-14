@@ -61,7 +61,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	var keepAliveC <-chan time.Time
 	keepAliveInterval := time.Duration(0)
 	if h != nil {
-		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.Cfg)
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.CurrentConfig())
 	}
 	if opts.keepAliveInterval != nil {
 		keepAliveInterval = *opts.keepAliveInterval
@@ -71,7 +71,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		defer keepAliveTicker.Stop()
 		keepAliveC = keepAliveTicker.C
 	}
-	if opts.localInterrupt != nil {
+	if opts.localInterrupt != nil && (opts.duplexStream == nil || !opts.duplexStream()) {
 		opts.localInterrupt.begin()
 		defer opts.localInterrupt.end()
 	}
@@ -199,6 +199,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
+					// End local HTTP cancellation before the client sees a terminal frame.
+					opts.localInterrupt.end()
 				}
 				markAPIResponseTimestamp(c)
 				if payloadErrMsg != nil {

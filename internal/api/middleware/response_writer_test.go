@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -124,6 +125,46 @@ func TestExtractWebsocketTimelineUsesOverride(t *testing.T) {
 	if string(body) != "timeline" {
 		t.Fatalf("websocket timeline = %q, want %q", string(body), "timeline")
 	}
+}
+
+func TestFinalizeDrainsChunksBeforeWorkerStarts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		streamWriter := &recordingStreamingLogWriter{}
+		chunks := make(chan []byte, 1)
+		chunks <- []byte("queued chunk")
+		done := make(chan struct{})
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         &testRequestLogger{enabled: true},
+			requestInfo:    &RequestInfo{},
+			isStreaming:    true,
+			streamWriter:   streamWriter,
+			chunkChannel:   chunks,
+			streamDone:     done,
+		}
+		finalized := make(chan error, 1)
+		go func() { finalized <- wrapper.Finalize(c) }()
+		// Finalize closes the queue and waits before the worker gets scheduled.
+		synctest.Wait()
+		go wrapper.processStreamingChunks(done)
+		synctest.Wait()
+		if errFinalize := <-finalized; errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+		if string(streamWriter.chunks) != "queued chunk" || !streamWriter.closed {
+			t.Fatalf("finalized log: chunks=%q closed=%t", streamWriter.chunks, streamWriter.closed)
+		}
+	})
+}
+
+type recordingStreamingLogWriter struct {
+	testStreamingLogWriter
+	chunks []byte
+}
+
+func (w *recordingStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.chunks = append(w.chunks, chunk...)
 }
 
 func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
