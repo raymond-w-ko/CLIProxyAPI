@@ -373,6 +373,46 @@ WebSocket handling. Tests using removed Gemini models now use current entries.
 The fork's GHCR workflow still retains the latest build and two previous builds,
 including their referenced manifests. Inherited upstream workflows stay disabled.
 
+## Upstream registration and TLS establishment update
+
+The merge through `5fc580b1` includes 12 upstream commits. Native Claude Code and
+Codex benefit from safer credential-file removal and model registration: delayed
+work can no longer overwrite a newer registration, and a delayed file-delete
+event checks the current file before removing credentials that were recreated.
+Unreadable or invalid replacement files retain the current credentials until
+their state can be determined. Durable ownership and quota-only migration are
+unchanged; removed owners still fail closed.
+
+Upstream also adds an optional TLS handshake limit:
+
+```yaml
+requests:
+  tls-handshake-timeout-seconds: 0
+```
+
+The default `0` leaves this limit disabled. A positive value bounds only TLS
+establishment on the shared uTLS Anthropic and ChatGPT/Codex HTTP paths. It does
+not bound TCP dialing, proxy CONNECT, response generation, or streaming, and the
+standard fallback transport does not use it. Enable it only if stalled TLS
+handshakes are a problem. A configured handshake timeout uses the existing retry
+budget without cooling the credential. A fork regression verifies that durable
+retries keep the same account; this timeout never authorizes migration.
+
+Other changes update Gemini 3.8 and Muse Wonder catalogs, Antigravity's client
+version, tool schemas, cached-token accounting, and Gemini-to-Claude error and
+tool-call translation. Plugin configuration defaults also improve. These changes
+have little direct relevance to native Claude Code and Codex without plugins.
+No configuration migration or urgent deployment is required.
+
+Race validation exposed an existing Claude setup-token metadata read racing
+with account-profile writes. The fork now uses the same metadata lock for those
+boolean reads and covers them in the concurrent-reader regression. Validation
+also retains the known local multicast-discovery integration-test limitation;
+it is separate from HTTP proxy routing.
+
+The GHCR publisher and its three-build retention policy remain unchanged. Only
+the fork publishing workflow is enabled.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

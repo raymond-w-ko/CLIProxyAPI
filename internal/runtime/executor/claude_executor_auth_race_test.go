@@ -80,13 +80,17 @@ func TestClaudeExecutorSharedCredentialMetadataReadersUseOneLock(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			if i%3 == 0 {
+			if i%4 == 0 {
 				claudeauth.StoreMetadataValue(&auth.Metadata, "access_token", "sk-ant-oat-race-probe")
 				claudeauth.StoreMetadataValue(&auth.Metadata, "cloak_mode", "always")
 				return
 			}
-			if i%3 == 1 {
+			if i%4 == 1 {
 				_, _ = claudeCreds(auth)
+				return
+			}
+			if i%4 == 2 {
+				_ = isClaudeSetupToken(auth, "sk-ant-oat-race-probe")
 				return
 			}
 			_, _, _, _ = getCloakConfigFromAuth(auth)

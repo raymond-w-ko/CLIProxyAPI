@@ -318,6 +318,7 @@ func TestDurableAffinityTransportRetryUsesSameOwner(t *testing.T) {
 		{"dial refused", dialRefusedError()},
 		{"http2 force closed", errors.New("http2: client connection force closed via ClientConn.Close")},
 		{"http2 conn closed", errors.New("http2: client conn is closed")},
+		{"configured TLS handshake timeout", cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
