@@ -413,6 +413,42 @@ it is separate from HTTP proxy routing.
 The GHCR publisher and its three-build retention policy remain unchanged. Only
 the fork publishing workflow is enabled.
 
+## Upstream cooldown ordering and config-save update
+
+The merge through `5be2cdab` includes 13 upstream commits (including two merge
+commits). The changes most relevant to native Claude Code and Codex are:
+
+- In-flight execution results now carry a dispatch sequence. A successful
+  request dispatched before a newer cooldown was recorded cannot clear that
+  cooldown when it finishes. This covers normal requests, streaming, and token
+  counting. The fork still retains confirmed account/model quota deadlines even
+  for later successes; the expanded regression covers both dispatch orders and
+  results without a sequence. Generic 429s still do not authorize migration.
+- Config reloads are serialized and track the exact bytes parsed. Management
+  saves reject stale reload snapshots and hold the config lock through mutation
+  and persistence. This extends the fork's earlier pending-write fix; its
+  regression remains in place. Binding-file ownership and persistence are
+  unchanged.
+- `upstream.claude.header-defaults` gains `anthropic-beta-strip`,
+  `anthropic-beta-append`, `inject-diagnostics`, and `client-request-id` controls.
+  Defaults preserve the current request shape: no beta overrides, diagnostics
+  injection enabled, and request-ID mode `on`. Leave these defaults for native
+  Claude Code unless diagnosing a specific compatibility problem. Per-credential
+  headers retain their documented precedence; these controls do not change
+  session identity or durable account ownership.
+
+Other changes fix Vertex API-key base URLs and trailing thought-only turns,
+Gemini/Antigravity schema handling, xAI web-search options, and incomplete tool
+results when translating OpenAI Responses requests to Claude. The catalog adds
+`gemini-4-argon`. These have little direct relevance when each native client uses
+its matching provider.
+
+Remote-store bootstrap now hashes plaintext management keys before seeding Git,
+Postgres, or object storage, and refuses ambiguous files that still contain the
+plaintext elsewhere. This does not require changes to the local-file Docker
+deployment. No configuration migration is required. The GHCR publisher remains
+isolated, with the latest build and two previous builds retained.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
