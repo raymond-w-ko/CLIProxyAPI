@@ -449,6 +449,41 @@ plaintext elsewhere. This does not require changes to the local-file Docker
 deployment. No configuration migration is required. The GHCR publisher remains
 isolated, with the latest build and two previous builds retained.
 
+## Upstream config concurrency and plugin reload update
+
+The merge through `e7003d2a` includes four upstream commits. Config reads under
+`/v8/management/config` now return an ETag. Clients can send that value in
+`If-Match` on writes to reject stale edits with HTTP 412 instead of overwriting
+another save. This protection requires client participation; writes without
+`If-Match` remain unconditional. Query-log masking also covers `value`, which
+can contain a client API key. Neither change modifies durable binding storage.
+
+Claude-to-Responses streaming now validates and selects request metadata once
+per stream instead of revalidating the full request on every chunk. This reduces
+repeated work for long conversations routed from Responses clients to Claude;
+native Claude Messages and native Codex routes do not use this translator.
+
+For the opt-in Sign in with ChatGPT (SIWC) route, unsupported
+`configuration_update` items are removed and their last reasoning effort is
+promoted to the request level. Explicit model thinking suffixes retain precedence,
+and user payload rules still run last. SIWC steering frames remove these items
+without changing response-level reasoning. Ordinary Codex OAuth continues to
+preserve configuration updates. No configuration migration is required.
+
+Plugin libraries now load from content-addressed shadow copies so replacing a
+plugin artifact can load its new code safely. Logical unload detaches callbacks
+but keeps loaded Go runtimes mapped until process exit; repeated distinct plugin
+builds can therefore retain memory until restart. This does not affect the
+recommended deployment without plugins. Thanks to the upstream contributors;
+their original commits and authorship are preserved by the merge.
+
+Durable ownership, quota-only migration, the isolated GHCR publisher, and its
+three-build retention policy remain unchanged.
+
+Validation includes the server build, full test suite, affected-package race
+checks, durable-affinity regressions, and all nine image-retention tests. The
+full suite's only failure remains the known local multicast-discovery test.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
