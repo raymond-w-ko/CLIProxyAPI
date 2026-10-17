@@ -746,6 +746,70 @@ func TestDurableAffinityModelQuotaSurvivesLateSuccess(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityLayeredCooldownRestoresModelPolicy(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, confirmed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("confirmed=%t", confirmed), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			store := NewFileCooldownStateStore(t.TempDir())
+			m.SetCooldownStateStore(store)
+			opts := durableTestOptions()
+			if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+				t.Fatal(errPick)
+			}
+			modelError := &Error{HTTPStatus: 429, Message: "model limit"}
+			if confirmed {
+				modelError.Code = ErrorCodeModelQuota
+			}
+			modelDelay := time.Hour
+			m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+				Error: modelError, RetryAfter: &modelDelay})
+			owner, _ := m.GetByID(ids[0])
+			modelDeadline := owner.ModelStates["model-one"].Quota.NextRecoverAt
+			accountDelay := time.Minute
+			m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-two",
+				Error: &Error{HTTPStatus: 429}, CredentialScope: true, RetryAfter: &accountDelay})
+
+			restarted, _ := durableTestManager(t, path)
+			restarted.SetCooldownStateStore(store)
+			if errRestore := restarted.RestoreCooldownStates(context.Background()); errRestore != nil {
+				t.Fatal(errRestore)
+			}
+			// Expire only the account layer without waiting. A later generic failure
+			// must recover the persisted model layer without inventing exhaustion.
+			restarted.mu.Lock()
+			restarted.auths[ids[0]].Quota.NextRecoverAt = time.Now().Add(-time.Second)
+			restarted.mu.Unlock()
+			genericDelay := 2 * time.Hour
+			restarted.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+				Error: &Error{HTTPStatus: 429}, RetryAfter: &genericDelay})
+			owner, _ = restarted.GetByID(ids[0])
+			state := owner.ModelStates["model-one"]
+			if confirmed && (state.Quota.Reason != ErrorCodeModelQuota || !state.Quota.NextRecoverAt.Equal(modelDeadline)) {
+				t.Fatalf("model confirmation changed after restoring layers: %+v", state.Quota)
+			}
+			selected, errPick := durableTestPick(restarted, "model-one", opts)
+			if confirmed {
+				if errPick != nil || selected.ID != ids[1] {
+					t.Fatalf("confirmed model quota did not authorize migration: %v, %v", selected, errPick)
+				}
+			} else if errPick == nil {
+				t.Fatalf("generic model cooldown unexpectedly selected %v", selected)
+			}
+			// A further restart proves only confirmed exhaustion changed ownership.
+			final, _ := durableTestManager(t, path)
+			wantOwner := ids[0]
+			if confirmed {
+				wantOwner = ids[1]
+			}
+			if selected, errPick := durableTestPick(final, "model-two", opts); errPick != nil || selected.ID != wantOwner {
+				t.Fatalf("persisted owner = %v, %v; want %s", selected, errPick, wantOwner)
+			}
+		})
+	}
+}
+
 func TestDurableAffinityModelQuotaDoesNotConfirmGenericDeadline(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))

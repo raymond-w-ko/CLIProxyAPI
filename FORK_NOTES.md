@@ -99,10 +99,11 @@ These upstream settings do not change durable ownership or quota-only migration.
 
 ## Upstream Claude continuity and refresh update
 
-Claude's injected date now stays fixed while its in-memory continuity entry
-survives, avoiding prompt-cache invalidation at midnight. This date is separate
-from durable account ownership: a restart, cache expiry, or account migration
-can establish a new date.
+Claude's injected date originally stayed fixed while its in-memory continuity
+entry survived, avoiding prompt-cache invalidation at midnight. The later update
+through `911f49cb` retains the date independently for seven days by default, as
+described below. Date pins remain separate from durable account ownership and
+are not persisted across restarts.
 
 An upstream 401 followed by an invalid refresh grant now keeps the credential
 unavailable instead of repeatedly retrying it. A new login or a successful
@@ -483,6 +484,46 @@ three-build retention policy remain unchanged.
 Validation includes the server build, full test suite, affected-package race
 checks, durable-affinity regressions, and all nine image-retention tests. The
 full suite's only failure remains the known local multicast-discovery test.
+
+## Upstream preserved-thinking and layered cooldown update
+
+The merge through `911f49cb` includes five upstream commits. Claude requests that
+replay signed thinking on supported preserved-thinking models now default
+`thinking.block_binding.prefix_mismatch_behavior` to `drop_block`, provided the
+thinking mode supports binding controls. The matching beta header is included.
+This lets Anthropic discard mismatched thinking instead of rejecting the request
+with HTTP 400; it does not preserve those discarded blocks or make them portable
+between accounts. Caller-supplied behavior is retained, and final user payload
+rules can override the value to `error` or filter the binding field. Durable
+affinity remains independent: only confirmed quota exhaustion permits migration.
+
+The new `upstream.claude.session-date-pin-days` setting defaults to `7`. It keeps
+the cloaked currentDate reminder stable across continuity-cache expiry and
+credential switches, with a sliding retention window. An explicit `0` restores
+the previous continuity-scoped behavior. These pins are bounded, in-memory state;
+expiry, eviction, or process restart can lose them. A valid caller reminder can
+seed a new pin. The setting does not persist dates in `session-bindings.json`,
+and no configuration edit is required for the default behavior.
+
+Devin's explicit daily/weekly quota exhaustion now cools the whole credential and
+uses observed reset deadlines when available. Exhausted Devin credentials can
+revalidate quota hourly and recover early on a fresh positive observation.
+Shared cooldown handling preserves each model's independent failure underneath
+an account-wide cooldown, including across cooldown-file reloads. A fork
+regression verifies that restoring these layers retains confirmed model-quota
+deadlines, while generic rate limits never gain permission to move ownership.
+
+Other changes remove schema-injected placeholder arguments when Gemini or
+Antigravity returns tool calls to Claude clients, preserve distinct tool names,
+and avoid reporting a canceled Meta stream as failed after its terminal event.
+These changes have little effect on native Claude/Codex routes. Upstream commit
+history and contributor authorship are preserved. The isolated GHCR publisher
+and its latest-plus-two-previous-build retention policy remain unchanged.
+
+The server build, affected-package race checks, durable-affinity regressions,
+and all nine retention tests pass. The new layered-cooldown regression also
+passes ten race-enabled repetitions. The full suite's only failure remains the
+known local multicast-discovery integration test.
 
 ## Recommended Docker Compose deployment
 
