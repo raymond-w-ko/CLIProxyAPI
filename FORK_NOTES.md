@@ -525,6 +525,58 @@ and all nine retention tests pass. The new layered-cooldown regression also
 passes ten race-enabled repetitions. The full suite's only failure remains the
 known local multicast-discovery integration test.
 
+## Upstream stream completion and credential snapshot update
+
+The merge through `2422c6b0` includes 25 upstream commits, including three merge
+commits. The most relevant changes for native Claude Code and Codex use are:
+
+- Claude streams that end without a valid completion now report an upstream
+  error instead of silently succeeding. The Claude HTTP handler also detects
+  missing completion across split SSE chunks. Several translated provider paths
+  gain corresponding checks. This exposes interrupted responses to clients; it
+  does not resume a response or authorize account migration. A fork regression
+  checks both native Claude and Responses-to-Claude streams and reloads the
+  durable binding to verify that truncation retains ownership.
+- Explicit Claude per-minute request/input/output-token errors with a usable
+  `Retry-After` and no quota-status headers no longer inherit an unrelated,
+  hours-long unified reset. Other errors keep conservative reset handling.
+  Expanded fork coverage verifies short cooldowns without account migration
+  across execution, streaming, token counting, and compaction.
+- File-derived credential updates carry a content digest. A delayed watcher
+  snapshot cannot overwrite newer persisted credentials. Model registration
+  also reconciles current state when concurrent changes invalidate its result.
+  Stable credential IDs and durable ownership are unchanged.
+- Claude preserved-thinking binding now handles replayed signed blocks when the
+  caller omits `thinking`: it supplies adaptive thinking and the existing
+  `drop_block` default, except for forced tool choices. Caller settings and final
+  payload overrides still take precedence. Mismatched thinking can still be
+  discarded; this is compatibility handling, not a guarantee of preservation.
+- Thinking normalization uses Sonnet 5.5's `between_tools` mode for an off
+  request. Models that cannot disable thinking fall back to their lowest
+  supported effort with thinking display omitted. Dated/context-suffixed Claude
+  variants inherit family capabilities through the canonical thinking pipeline.
+
+Credential-specific, nonempty `excluded_models` lists now replace global OAuth
+exclusions for that credential instead of merging with them. Missing, empty, or
+null lists inherit current global rules, including after reload. Invalid file
+entries retain usable rules rather than dropping the credential; write APIs
+reject invalid values. Review custom exclusion lists if they previously relied
+on the union with global rules. Excluding the durable owner's requested model
+still fails closed rather than switching accounts without quota exhaustion.
+
+Other changes improve plugin model ownership and exclusion handling, preserve
+large plugin usage events, remove Meta subscription telemetry from client
+responses, and speed up Antigravity schema cleanup. LAN discovery gains host
+conflict resolution and interface binding fallbacks. No configuration migration
+is required for the recommended deployment. Upstream authorship is preserved;
+the isolated GHCR workflow and three-build retention remain unchanged.
+
+Validation: the server build and nine retention tests pass. The full suite and
+broad race checks fail only the known local multicast-discovery integration
+test; the new discovery unit tests pass. Expanded affinity regressions pass five
+race-enabled repetitions. They confirm that per-minute throttling and truncated
+streams do not move durable ownership.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

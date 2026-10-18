@@ -33,7 +33,7 @@ func (e durableClaudeTestExecutor) CountTokens(ctx context.Context, auth *clipro
 
 func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 	for _, mode := range []string{"execute", "stream", "count", "compact", "compact-stream"} {
-		for _, scenario := range []string{"model quota", "both exhausted", "generic 429", "overage billing", "model quota with billing"} {
+		for _, scenario := range []string{"model quota", "both exhausted", "generic 429", "per-minute rate", "overage billing", "model quota with billing"} {
 			t.Run(mode+"/"+scenario, func(t *testing.T) {
 				const model = "claude-fable-5-1"
 				var mu sync.Mutex
@@ -49,6 +49,9 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					if key == "first" || scenario == "both exhausted" {
 						if scenario == "generic 429" {
 							w.Header().Set("Retry-After", "3600")
+						} else if scenario == "per-minute rate" {
+							w.Header().Set("Retry-After", "30")
+							w.Header().Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(time.Now().Add(4*time.Hour).Unix(), 10))
 						} else if scenario != "overage billing" {
 							w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 							w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
@@ -64,6 +67,10 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 							w.Header().Set("Anthropic-Ratelimit-Unified-Overage-Reset", billingReset)
 						}
 						w.WriteHeader(http.StatusTooManyRequests)
+						if scenario == "per-minute rate" {
+							_, _ = w.Write(claudePerMinuteBody("requests"))
+							return
+						}
 						_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit."}}`)
 						return
 					}
@@ -83,7 +90,7 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 				defer selector.Stop()
 				manager := cliproxyauth.NewManager(nil, selector, nil)
 				manager.SetRetryConfig(3, 30*time.Second, 0)
-				if scenario == "overage billing" {
+				if scenario == "overage billing" || scenario == "per-minute rate" {
 					// Exercise one rejection without waiting through generic backoff.
 					manager.SetRetryConfig(0, 0, 0)
 				}
@@ -149,11 +156,21 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 				first, second := attempts["first"], attempts["second"]
 				mu.Unlock()
 				wantSecond := 1
-				if scenario == "generic 429" || scenario == "overage billing" {
+				if scenario == "generic 429" || scenario == "per-minute rate" || scenario == "overage billing" {
 					wantSecond = 0
 				}
 				if first != 1 || second != wantSecond {
 					t.Fatalf("upstream attempts: first=%d second=%d; want 1 and %d", first, second, wantSecond)
+				}
+				if scenario == "per-minute rate" {
+					failed, _ := manager.GetByID(ids[0])
+					state := failed.ModelStates[model]
+					if state == nil || !state.NextRetryAfter.After(time.Now()) || state.NextRetryAfter.After(time.Now().Add(time.Minute)) {
+						t.Fatalf("per-minute rate limit inherited the long quota reset: %+v", state)
+					}
+					if state.Quota.Reason == cliproxyauth.ErrorCodeModelQuota || failed.Quota.Reason == "credential_quota" {
+						t.Fatal("per-minute rate limit became confirmed quota exhaustion")
+					}
 				}
 				if scenario == "overage billing" || scenario == "model quota with billing" {
 					failed, _ := manager.GetByID(ids[0])
@@ -169,6 +186,81 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestClaudeDurableAffinityTruncatedStreamKeepsOwner(t *testing.T) {
+	for _, format := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAIResponse} {
+		t.Run(format.String(), func(t *testing.T) {
+			const model = "claude-sonnet-4-6"
+			var mu sync.Mutex
+			attempts := map[string]int{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				key := r.Header.Get("X-Api-Key")
+				if key == "" {
+					key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				}
+				mu.Lock()
+				attempts[key]++
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_truncated\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1}}}\n\n")
+				w.(http.Flusher).Flush()
+				// EOF without message_stop must be an error, not a successful response.
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			selector := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
+				File: path, Fallback: &cliproxyauth.FillFirstSelector{},
+			})
+			defer selector.Stop()
+			manager := cliproxyauth.NewManager(nil, selector, nil)
+			manager.SetRetryConfig(0, 0, 0)
+			manager.RegisterExecutor(NewClaudeExecutor(&config.Config{}))
+			ids := []string{t.Name() + "-a", t.Name() + "-b"}
+			for i, key := range []string{"first", "second"} {
+				registry.GetGlobalRegistry().RegisterClient(ids[i], "claude", []*registry.ModelInfo{{ID: model}, {ID: "claude-opus-5"}})
+				defer registry.GetGlobalRegistry().UnregisterClient(ids[i])
+				if _, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), &cliproxyauth.Auth{
+					ID: ids[i], Provider: "claude", Attributes: map[string]string{"api_key": key, "base_url": server.URL},
+				}); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+			}
+			opts := cliproxyexecutor.Options{SourceFormat: format, Headers: http.Header{"X-Session-Id": {"stable"}}}
+			payload := []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"test"}],"max_tokens":16}`)
+			if format == sdktranslator.FormatOpenAIResponse {
+				payload = []byte(`{"model":"claude-sonnet-4-6","input":"test"}`)
+			}
+			stream, streamErr := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model, Payload: payload}, opts)
+			if streamErr == nil {
+				for chunk := range stream.Chunks {
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+				}
+			}
+			var status interface{ StatusCode() int }
+			if !errors.As(streamErr, &status) || status.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("truncated stream error = %v, want HTTP 502", streamErr)
+			}
+			mu.Lock()
+			first, second := attempts["first"], attempts["second"]
+			mu.Unlock()
+			if first != 1 || second != 0 {
+				t.Fatalf("truncated stream changed accounts: first=%d second=%d", first, second)
+			}
+			// Reload durable ownership into a fresh selector, with the same credentials.
+			reloaded := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
+				File: path, Fallback: &cliproxyauth.FillFirstSelector{},
+			})
+			defer reloaded.Stop()
+			manager.SetSelector(reloaded)
+			owner, errSelect := manager.SelectAuth(context.Background(), "claude", "claude-opus-5", opts)
+			if errSelect != nil || owner.ID != ids[0] {
+				t.Fatalf("truncation changed persisted ownership: %v, %v", owner, errSelect)
+			}
+		})
 	}
 }
 
