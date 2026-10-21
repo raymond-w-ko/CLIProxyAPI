@@ -935,6 +935,77 @@ func TestDurableAffinityStaleQuotaAfterCredentialUpdateKeepsOwner(t *testing.T) 
 	}
 }
 
+func TestDurableAffinityResultTokenAfterCredentialUpdate(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, tc := range []struct {
+		name            string
+		status          int
+		code            string
+		credentialScope bool
+		replaceToken    bool
+		migrate         bool
+	}{
+		{name: "same token unauthorized", status: 401},
+		{name: "same token generic rate limit", status: 429},
+		{name: "same token model quota", status: 429, code: ErrorCodeModelQuota, migrate: true},
+		{name: "same token credential quota", status: 429, credentialScope: true, migrate: true},
+		{name: "replaced token model quota", status: 429, code: ErrorCodeModelQuota, replaceToken: true},
+		{name: "replaced token credential quota", status: 429, credentialScope: true, replaceToken: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			owner, _ := m.GetByID(ids[1])
+			owner.Metadata = map[string]any{"access_token": "original-token", "refresh_token": "old-refresh"}
+			if _, errUpdate := m.Update(context.Background(), owner); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			opts := durableTestOptions()
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+			before, errPick := durableTestPick(m, "model-one", opts)
+			if errPick != nil {
+				t.Fatal(errPick)
+			}
+			updated := before.Clone()
+			updated.Metadata["refresh_token"] = "new-refresh"
+			if tc.replaceToken {
+				updated.Metadata["access_token"] = "replacement-token"
+			}
+			current, errUpdate := m.Update(context.Background(), updated)
+			if errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			if current.CredentialVersion <= before.CredentialVersion {
+				t.Fatal("credential update did not advance the version")
+			}
+			cooldown := time.Hour
+			m.MarkResult(context.Background(), Result{
+				AuthID: before.ID, Provider: "claude", Model: "model-one",
+				AccessToken: authAccessToken(before), CredentialVersion: before.CredentialVersion,
+				RegistrationEpoch: before.RegistrationEpoch, CredentialScope: tc.credentialScope,
+				Error: &Error{HTTPStatus: tc.status, Code: tc.code}, RetryAfter: &cooldown,
+			})
+			want := ids[1]
+			if tc.migrate {
+				want = ids[0]
+			}
+			picked, errPick := durableTestPick(m, "model-one", durableTestOptions())
+			if tc.migrate && errPick != nil {
+				t.Fatal(errPick)
+			}
+			if picked != nil && picked.ID != want {
+				t.Fatalf("selected %s, want %s", picked.ID, want)
+			}
+			// Reopen the binding with healthy accounts to detect any unintended migration.
+			restarted, _ := durableTestManager(t, path)
+			picked, errPick = durableTestPick(restarted, "model-two", durableTestOptions())
+			if errPick != nil || picked.ID != want {
+				t.Fatalf("restored owner = %v, %v; want %s", picked, errPick, want)
+			}
+		})
+	}
+}
+
 func TestDurableAffinityRefreshPreservesConfirmedModelQuota(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	m, _, primary, backup, model := newUnauthorizedRefreshFixture(t, false)

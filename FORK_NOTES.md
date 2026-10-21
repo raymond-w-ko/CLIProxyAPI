@@ -629,6 +629,43 @@ a validation limitation; the existing best-effort close path is unchanged.
 Upstream contributor history, the isolated GHCR publisher, and the latest plus
 two previous builds retention policy remain intact.
 
+## Upstream rejected-token and empty-text update
+
+The merge through `ce07d189` includes 14 upstream commits, including three merge
+commits. No configuration migration is required for the recommended deployment.
+
+- Codex tracks rejected Sign in with ChatGPT (SIWC) tokens separately from its
+  outer OAuth token. Refreshing only the outer token no longer makes a rejected
+  SIWC token appear usable. Late results carry the token used by the request, so
+  a concurrent credential update does not discard a failure for the same active
+  token or apply an old failure to its replacement. The new v8 SIWC status
+  endpoints report local validity without sending a verification request.
+- Claude cache-marker placement skips empty or whitespace-only text blocks.
+  Chat Completions and Responses translation also removes empty text blocks,
+  including empty tool-result text. This prevents invalid cache markers from
+  causing upstream request errors. Final user payload rules still take precedence.
+- Stream translators cache tool-name maps and request metadata instead of
+  repeatedly scanning each request. OpenAI Responses translation extracts the
+  fields echoed in its final response once. These changes reduce repeated work
+  on translated paths; they do not change durable session ownership.
+- Gemini preserves successful usage accounting when the client cancels after
+  receiving stream completion. Vertex gains optional per-model and per-credential
+  `openapi` routing controls and an `openapi-location` override. Plugins can query
+  registered models per credential through `host.auth.models`.
+
+New fork regressions cover delayed results after credential-version changes.
+A 401 or unclassified 429 with the same active token retains the durable owner.
+Confirmed model or credential quota still permits migration for that token.
+Quota reported for a replaced token does not move ownership. Each case reopens
+the binding file and checks the owner on a different model.
+
+Validation: the server build and all nine image-retention tests pass. The normal
+full suite and full race suite fail only the known local multicast discovery
+integration test. No data races were reported. Durable-affinity and upstream
+SIWC regression tests pass five race-enabled repetitions. The previous usage
+reporting fix remains in place. Upstream history, the isolated GHCR publisher,
+and retention of the latest plus two previous builds remain intact.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
