@@ -580,7 +580,21 @@ func (r *UsageReporter) publishAttemptRecord(ctx context.Context, record usage.R
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	if ctx != nil {
+		ctx = usageRecordContext{Context: ctx}
+	}
 	usage.PublishRecord(ctx, record)
+}
+
+// Usage metadata was captured when the reporter was created. The pooled Gin
+// context may already belong to another request when a stream publishes usage.
+type usageRecordContext struct{ context.Context }
+
+func (ctx usageRecordContext) Value(key any) any {
+	if key == "gin" {
+		return nil
+	}
+	return ctx.Context.Value(key)
 }
 
 // RequestID returns the execution instance request ID for this reporter.
@@ -1046,7 +1060,8 @@ func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 		usageNode.Get("input_tokens_details.cache_write_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cache_creation_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
-		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("reasoning_tokens").Exists()
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
@@ -1084,6 +1099,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
+	}
+	if !reasoning.Exists() {
+		// Flat dialect (e.g. SGLang): usage.reasoning_tokens at top level.
+		reasoning = usageNode.Get("reasoning_tokens")
 	}
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()

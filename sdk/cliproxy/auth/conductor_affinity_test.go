@@ -163,6 +163,67 @@ func TestDurableAffinityTerminalUnauthorizedKeepsOwner(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityRejectedUnexpiredTokenKeepsOwner(t *testing.T) {
+	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	installSelector := func() {
+		selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+		t.Cleanup(selector.Stop)
+		m.SetSelector(selector)
+	}
+	installSelector()
+	primary.Metadata["expired"] = time.Now().Add(8 * 24 * time.Hour).Format(time.RFC3339)
+	if _, errUpdate := m.Update(context.Background(), primary); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	executor.refreshErr = errors.New("refresh upstream unavailable")
+	opts := durableTestOptions()
+	request := cliproxyexecutor.Request{Model: model}
+	if _, errExecute := m.Execute(context.Background(), []string{"codex"}, request, opts); errExecute == nil {
+		t.Fatal("rejected owner unexpectedly succeeded through another account")
+	}
+	owner, ok := m.GetByID(primary.ID)
+	if !ok || owner.RejectedAccessToken != "stale-access-token" || owner.NextRefreshAfter.IsZero() {
+		t.Fatal("rejected unexpired token did not schedule refresh")
+	}
+	// Reload the persisted binding while the owner's refresh remains unavailable.
+	installSelector()
+	if _, errExecute := m.Execute(context.Background(), []string{"codex"}, request, opts); errExecute == nil {
+		t.Fatal("binding reload bypassed the rejected owner")
+	}
+	executor.mu.Lock()
+	executor.refreshErr = nil
+	executor.mu.Unlock()
+	loop := newAuthAutoRefreshLoop(m, 5*time.Second, 1)
+	loop.handleDueAuth(context.Background(), owner.NextRefreshAfter.Add(time.Second), primary.ID)
+	select {
+	case job := <-loop.jobs:
+		if !m.beginRefreshJob(context.Background(), job) {
+			t.Fatal("background refresh did not start")
+		}
+		if _, errRefresh := m.refreshAuthForRequestAtEpoch(context.Background(), job.id, "", job.registrationEpoch); errRefresh != nil {
+			t.Fatal(errRefresh)
+		}
+		m.finishRefreshJob(job, time.Time{}, false)
+	default:
+		t.Fatal("rejected token did not enqueue background refresh")
+	}
+	response, errExecute := m.Execute(context.Background(), []string{"codex"}, request, opts)
+	if errExecute != nil || string(response.Payload) != primary.ID+":fresh-access-token" {
+		t.Fatalf("recovered owner response = %s, %v", response.Payload, errExecute)
+	}
+	for _, id := range executor.ExecuteCalls() {
+		if id != primary.ID {
+			t.Fatalf("non-quota failure migrated to %s", id)
+		}
+	}
+	store := loadDurableSessions(path)
+	sessionID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if store.err != nil || store.owner(durableSessionKey("codex", sessionID, opts)) != primary.ID {
+		t.Fatal("persisted owner changed during token recovery")
+	}
+}
+
 func TestDurableAffinityConcurrentFirstRequests(t *testing.T) {
 	m, _ := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
 	m.SetSelector(NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: m.durableAffinitySelector().file, Fallback: &RoundRobinSelector{}}))

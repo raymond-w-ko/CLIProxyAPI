@@ -577,6 +577,58 @@ test; the new discovery unit tests pass. Expanded affinity regressions pass five
 race-enabled repetitions. They confirm that per-minute throttling and truncated
 streams do not move durable ownership.
 
+## Upstream token refresh, Claude client, and search replay update
+
+The merge through `20c9095c` includes 54 upstream commits. The main benefits for
+native Claude Code and Codex use are:
+
+- Codex starts proactive token refresh 96 hours before expiry, up from 24 hours.
+  A rejected token can trigger background refresh even when its stated expiry
+  is still in the future. Credential-wide scheduler updates prevent other model
+  routes from reusing that rejected token. A new fork regression verifies that
+  failed refresh, binding reload, and background recovery all retain the same
+  durable owner. A 401 still does not authorize account migration.
+- Credential-file watching retains accounts during incomplete writes and read
+  failures. Credential mutations and Sign in with ChatGPT binding also gain
+  checks against concurrent account replacement.
+- Claude recognizes native Agent SDK `sdk-ts` requests and more helper-request
+  shapes. Explicit `cloak_mode: never` preserves recognized native caller
+  headers. The `uncloak` mode removes Claude Code identity markers. Non-CLI API
+  keys also strip those markers with `never`; review this if you customize
+  cloaking. Native OAuth helper requests retain the required beta header.
+- Codex reconciles replayed web-search calls with tool declarations. Claude
+  translation handles refusal, context-window limits, and paused turns more
+  accurately. Other changes improve schema cleanup, signature handling, Vertex
+  partner models, and Kimi/Meta compaction.
+
+No configuration migration is required for the recommended deployment. The new
+`client.codex.web-search-result-cache` is disabled by default. When enabled for
+Responses clients routed to Claude, it restores omitted search results before
+final user payload rules run. Entries are scoped by caller/session and upstream
+credential. A replacement account cannot restore the old account's cached
+results. Standalone storage is memory-only, with a default 24-hour sliding
+lifetime and a 1,024-entry limit, not a byte limit. It is separate from persistent
+session ownership. Home mode uses existing key-value operations and needs no
+new protocol command; durable routing still rejects Home mode.
+
+Full race testing exposed a usage-reporting race with recycled HTTP request
+contexts. The fork now prevents late usage publication from consulting the
+pooled Gin context. It retains the metadata captured when the reporter was
+created. A deterministic regression and 20 race-enabled repetitions of the
+stream completion reproducer pass. Durable-affinity regressions pass five
+race-enabled repetitions.
+
+Validation: the server build and all nine image-retention tests pass. The normal
+full suite fails only the known local multicast discovery integration test.
+The final full race run reports no data races, but also catches an intermittent
+WebSocket replay-close test failure (abnormal close 1006 instead of 1012).
+That test passes 30 focused race-enabled repetitions, and the complete OpenAI
+handler package passes a subsequent race run. Its close-frame assertion remains
+a validation limitation; the existing best-effort close path is unchanged.
+
+Upstream contributor history, the isolated GHCR publisher, and the latest plus
+two previous builds retention policy remain intact.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

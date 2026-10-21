@@ -24,6 +24,27 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
+type retiredUsageGinContext struct {
+	t       *testing.T
+	retired bool
+}
+
+func (c *retiredUsageGinContext) Get(string) (any, bool) {
+	if c.retired {
+		c.t.Fatal("usage publication read the retired request context")
+	}
+	return nil, false
+}
+
+func TestUsageReporterDoesNotReadRetiredRequestContext(t *testing.T) {
+	ginCtx := &retiredUsageGinContext{t: t}
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	reporter := NewUsageReporter(ctx, "claude", "model", nil)
+	ginCtx.retired = true
+	// Empty captured fields must not trigger a late fallback to the pooled context.
+	reporter.EnsurePublished(ctx)
+}
+
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
@@ -50,6 +71,34 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	}
 	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.Output.NonReasoningTokens != 1 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseOpenAIUsageFlatReasoningDialect(t *testing.T) {
+	// SGLang-style usage: reasoning_tokens flat on the usage object.
+	data := []byte(`{"usage":{"prompt_tokens":241114,"total_tokens":242270,"completion_tokens":1156,"prompt_tokens_details":{"cached_tokens":240896},"reasoning_tokens":530}}`)
+	detail := ParseOpenAIUsage(data)
+
+	if detail.ReasoningTokens != 530 {
+		t.Fatalf("reasoning tokens = %d, want 530", detail.ReasoningTokens)
+	}
+	if detail.InputTokens != 241114 || detail.OutputTokens != 1156 || detail.TotalTokens != 242270 {
+		t.Fatalf("token counts = %+v", detail)
+	}
+	if detail.CachedTokens != 240896 || detail.CacheReadTokens != 240896 {
+		t.Fatalf("cached tokens = %d/%d", detail.CachedTokens, detail.CacheReadTokens)
+	}
+	if !detail.TokenBreakdown.Valid() {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+
+	// Streaming variant must behave the same.
+	streamDetail, ok := ParseOpenAIStreamUsage([]byte(`data: {"id":"x","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"reasoning_tokens":4}}`))
+	if !ok {
+		t.Fatalf("ParseOpenAIStreamUsage reported no usage")
+	}
+	if streamDetail.ReasoningTokens != 4 {
+		t.Fatalf("stream reasoning tokens = %d, want 4", streamDetail.ReasoningTokens)
 	}
 }
 
