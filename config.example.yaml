@@ -164,9 +164,13 @@ routing:
   session-affinity: false # default: false
   # Internal memory cache TTL only; durable bindings do not expire. Default: 1h
   session-affinity-ttl: "1h"
-  # When true (default), subagents (child sessions with parent references) inherit and bind
-  # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
-  # maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # When true (default), children inherit the parent's durable owner across models,
+  # within the same provider and caller scope. Existing child bindings take precedence.
+  # This includes guardian reviews (X-Openai-Subagent: guardian) and survives restarts.
+  # An unavailable parent owner fails closed unless confirmed quota permits migration.
+  # For memory-only SDK affinity, ordinary inheritance is model-scoped; guardians can
+  # use the parent's latest eligible selection across models on the same real provider.
+  # Memory-only parent lookups do not extend TTL; result refreshes do not reorder selections.
   # When false, subagents are distributed across the credential pool via the fallback selector
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.

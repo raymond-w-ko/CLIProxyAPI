@@ -666,6 +666,53 @@ SIWC regression tests pass five race-enabled repetitions. The previous usage
 reporting fix remains in place. Upstream history, the isolated GHCR publisher,
 and retention of the latest plus two previous builds remain intact.
 
+## Upstream guardian, effort, and search update
+
+The merge through `0db19025` includes 12 upstream commits, including three merge
+commits. No configuration migration is required for the recommended deployment.
+
+- Guardian reviews can inherit the parent's latest eligible credential across
+  models in upstream's memory-only affinity mode. Durable mode already inherits
+  the parent's saved owner across models and restarts, within one provider and
+  caller scope. It continues to reject unavailable owners unless confirmed quota
+  permits migration. Existing child ownership takes precedence over later parent
+  activity. The merge conflict in selector logging was resolved while keeping
+  upstream selection-order tracking and the fork's durable log distinction.
+- Claude `output_config.effort` now reaches Codex reasoning settings even when
+  `thinking` is omitted. Native Claude requests preserve the model's thinking
+  default in that case. Explicit `parallel_tool_calls: false` also survives
+  OpenAI-to-Codex translation. Model suffixes and final payload rules retain
+  their existing precedence.
+- Codex Alpha Search uses the original OAuth token for the exact ChatGPT search
+  endpoint when Sign in with ChatGPT is enabled. Normal Responses requests keep
+  using the nested token. This changes token selection within one account; it
+  does not authorize switching the durable account owner.
+- Antigravity tool replay gains caller isolation and continuity when Chat
+  Completions tool declarations change between turns. Claude-to-Responses and
+  Codex-to-Chat translation avoid repeated request and tool-metadata scans.
+
+Home gains planned cluster handoff. Its new `CLUSTER BALANCE` commands require
+matching Home server support. At review time, Home `main` (`862e13fe`) did not
+implement those commands; an explicit unsupported reply disables this client
+capability. Standalone durable affinity still rejects Home mode.
+
+The new Home tests exposed a repeatable shutdown stall: Redis pool closure can
+wait for a health probe behind a blocked command read. The fork reuses its
+existing cancellable connection wrapper for handoff commands, so cancellation
+closes that command's transport directly without closing active request pools.
+No new network timeout is added. The blocked-command tests pass ten repetitions
+with the race detector enabled.
+
+New guardian regressions verify inheritance after restart, no migration after
+401 or generic 429, migration after confirmed model quota, and persistent child
+ownership after later parent activity. Affinity and guardian tests pass five
+race-enabled repetitions. The isolated publisher and latest-plus-two-previous
+build retention policy remain unchanged.
+
+Validation: the server build and nine retention tests pass. After the Home fix,
+the full normal and race suites fail only the known local multicast discovery
+integration test. The race run reports no data races.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

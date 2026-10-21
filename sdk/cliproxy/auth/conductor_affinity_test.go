@@ -493,6 +493,66 @@ func TestDurableAffinityCallerIsolationAndChildInheritance(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityGuardianRestartAndQuotaPolicy(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, tc := range []struct {
+		name    string
+		status  int
+		code    string
+		migrate bool
+	}{
+		{name: "unauthorized", status: 401},
+		{name: "generic rate limit", status: 429},
+		{name: "confirmed model quota", status: 429, code: ErrorCodeModelQuota, migrate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			parent := cliproxyexecutor.Options{
+				Headers: http.Header{"Session_id": {"guardian-parent"}},
+				Metadata: map[string]any{
+					cliproxyexecutor.CallerScopeMetadataKey: "guardian-caller",
+					cliproxyexecutor.PinnedAuthMetadataKey:  ids[1],
+				},
+			}
+			if _, errPick := durableTestPick(m, "model-one", parent); errPick != nil {
+				t.Fatal(errPick)
+			}
+			// The guardian's first request must inherit across models with a cold memory cache.
+			restarted, _ := durableTestManager(t, path)
+			child := guardianTestOptions("guardian-child", "guardian-parent")
+			child.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = "guardian-caller"
+			selected, errPick := durableTestPick(restarted, "model-two", child)
+			if errPick != nil || selected.ID != ids[1] {
+				t.Fatalf("guardian inheritance = %v, %v", selected, errPick)
+			}
+			cooldown := time.Hour
+			restarted.MarkResult(context.Background(), Result{
+				AuthID: ids[1], Provider: "claude", Model: "model-two", Options: child,
+				Error: &Error{HTTPStatus: tc.status, Code: tc.code}, RetryAfter: &cooldown,
+			})
+			selected, _, _, errPick = restarted.pickNextMixed(context.Background(), []string{"claude"}, "model-two", child, map[string]struct{}{ids[1]: {}})
+			want := ids[1]
+			if tc.migrate {
+				want = ids[0]
+				if errPick != nil || selected.ID != want {
+					t.Fatalf("guardian quota migration = %v, %v", selected, errPick)
+				}
+			} else if errPick == nil || selected != nil {
+				t.Fatalf("guardian bypassed unavailable owner: %v, %v", selected, errPick)
+			}
+			// A later parent selection cannot replace an existing child's durable owner.
+			reloaded, _ := durableTestManager(t, path)
+			if selected, errPick = durableTestPick(reloaded, "model-one", parent); errPick != nil || selected.ID != ids[1] {
+				t.Fatalf("parent owner = %v, %v", selected, errPick)
+			}
+			if selected, errPick = durableTestPick(reloaded, "model-one", child); errPick != nil || selected.ID != want {
+				t.Fatalf("restored guardian owner = %v, %v; want %s", selected, errPick, want)
+			}
+		})
+	}
+}
+
 func TestDurableAffinityNoReplacementRetainsOwner(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	path := filepath.Join(t.TempDir(), "bindings.json")
