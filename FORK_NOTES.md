@@ -713,6 +713,49 @@ Validation: the server build and nine retention tests pass. After the Home fix,
 the full normal and race suites fail only the known local multicast discovery
 integration test. The race run reports no data races.
 
+## Upstream credential reload and WebSocket access update
+
+The merge through `07b5a7a1` (v8.0.39) includes 16 upstream commits. No
+configuration migration is required for the recommended deployment. Source
+builds now require Go 1.26.10; the container build supplies the toolchain.
+
+- File reloads preserve live cooldowns and refresh state. Discarded snapshots
+  are read again, and unreadable auth directories retain their known accounts.
+  Configured request-scoped 401 rules no longer reject or refresh the token.
+- Responses WebSocket connections check access on each turn, including append
+  and steering input. A denied turn returns an error while keeping the socket
+  open. Codex also buffers `response.metadata` before generated output, so an
+  overload response can follow the existing retry policy.
+- Claude output that fills the context window now maps to `length` in Chat
+  Completions and `incomplete` with `max_output_tokens` in Responses. Input
+  overflow stream errors carry `context_length_exceeded`. Deferred web searches
+  stay open across tool results. Explicit `cloak_mode: never` validates client
+  headers against configured defaults.
+- Usage records include the outbound service tier after final payload rules.
+  Vertex uses the correct regional hosts for `us` and `eu`. Dependencies are
+  updated along with Go.
+
+The new Git library changed missing-pack errors and pack-handle caching. The
+fork recognizes missing pack or index paths as corruption while excluding
+unrelated paths and permission errors. Corruption tests now close and reopen
+the repository around file removal. Recovery still refuses to overwrite local
+changes when the original baseline cannot be read.
+
+New durable-affinity tests apply a stale healthy file snapshot after generic
+429, configured 401 cooldown, confirmed model quota, and confirmed credential
+quota results. Only confirmed quota permits migration. A restart on another
+model retains the saved owner. These cases pass five race-enabled repetitions.
+The earlier usage-context race and Home cancellation fixes remain in place.
+
+Home `main` (`862e13fe`) accepts usage JSON fields individually and does not yet
+store `effective_service_tier`. It ignores the added field; displaying it needs
+a matching Home update. Standalone durable affinity still rejects Home mode.
+
+Validation: the server build and all nine image-retention tests pass. After the
+Git-storage fix, the full normal and race suites fail only the known local
+multicast discovery integration test. No data races were reported. The isolated
+GHCR publisher and latest-plus-two-previous build retention remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

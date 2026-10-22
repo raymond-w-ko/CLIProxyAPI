@@ -803,6 +803,71 @@ func TestDurableAffinityMetadataSavePreservesConcurrentQuota(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityFileSnapshotPreservesMigrationPolicy(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, tc := range []struct {
+		name       string
+		status     int
+		code       string
+		credential bool
+		migrate    bool
+	}{
+		{"generic rate limit", 429, "", false, false},
+		{"model quota", 429, ErrorCodeModelQuota, false, true},
+		{"credential quota", 429, "", true, true},
+		{"configured 401 cooldown", 401, ErrorCodeForceCooldown, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, bindingPath)
+			opts := durableTestOptions()
+			owner, errPick := durableTestPick(m, "model-one", opts)
+			if errPick != nil {
+				t.Fatal(errPick)
+			}
+			// Capture a healthy file view before the live request records a failure.
+			snapshot := owner.Clone()
+			path := filepath.Join(t.TempDir(), "auth.json")
+			data := []byte(`{"type":"claude"}`)
+			if errWrite := os.WriteFile(path, data, 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			snapshot.Attributes = map[string]string{AttributePath: path, "excluded_models": "new-model"}
+			snapshot.BindFileSnapshot(path, data)
+			cooldown := time.Hour
+			m.MarkResult(context.Background(), Result{
+				AuthID: owner.ID, Provider: "claude", Model: "model-one",
+				Error:           &Error{HTTPStatus: tc.status, Code: tc.code, Message: tc.name},
+				CredentialScope: tc.credential, RetryAfter: &cooldown,
+				CredentialVersion: owner.CredentialVersion, RegistrationEpoch: owner.RegistrationEpoch,
+			})
+			if _, errUpdate := m.Update(WithSkipPersist(context.Background()), snapshot); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			current, _ := m.GetByID(owner.ID)
+			if current.Attributes["excluded_models"] != "new-model" {
+				t.Fatal("file snapshot was not applied")
+			}
+			selected, errPick := durableTestPick(m, "model-one", opts)
+			wantOwner := ids[0]
+			if tc.migrate {
+				wantOwner = ids[1]
+				if errPick != nil || selected == nil || selected.ID != wantOwner {
+					t.Fatalf("snapshot lost confirmed quota migration: %v, %v", selected, errPick)
+				}
+			} else if errPick == nil || selected != nil {
+				t.Fatalf("snapshot bypassed owner cooldown: %v, %v", selected, errPick)
+			}
+			// A restart and a different model must use the last saved owner.
+			restarted, _ := durableTestManager(t, bindingPath)
+			selected, errPick = durableTestPick(restarted, "model-two", opts)
+			if errPick != nil || selected == nil || selected.ID != wantOwner {
+				t.Fatalf("restored owner = %v, %v; want %s", selected, errPick, wantOwner)
+			}
+		})
+	}
+}
+
 func TestDurableAffinityExpiredModelQuotaKeepsOwner(t *testing.T) {
 	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
 	opts := durableTestOptions()
