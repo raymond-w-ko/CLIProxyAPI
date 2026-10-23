@@ -756,6 +756,50 @@ Git-storage fix, the full normal and race suites fail only the known local
 multicast discovery integration test. No data races were reported. The isolated
 GHCR publisher and latest-plus-two-previous build retention remain unchanged.
 
+## Upstream Codex client token and tool compatibility update
+
+The merge through `d946c4fb` (v8.0.40) includes six upstream commits. No
+configuration migration is required. Codex clients now ignore `use_siwc` and
+use the selected account's original OAuth token. Other clients retain the
+configured Sign in with ChatGPT (SIWC) behavior. A Codex client with no original
+token receives 401; it does not fall back to the nested SIWC token. WebSocket
+connections reconnect when the token mode changes. This does not change the
+durable account owner.
+
+Frontend authentication plugins receive an optional decoded request body for
+supported compressed routes. Decoding has size, window, layer, and concurrency
+limits. Gemini requests that combine built-in tools with function tools now
+declare server-side tool invocations. Claude usage forwards `usage.speed` as
+the response service tier. Home `main` (`eca75d68`) already stores that string
+field, so this forwarding needs no Home wire or storage schema change. The
+upstream release workflow now uses Go 1.26.10; it remains disabled in this fork.
+
+The new request-aware token lookup introduced a race during stream completion:
+it could read a recycled Gin request and reject the other token type. The fork
+captures the Codex client classification before starting asynchronous result
+recording. A deterministic test reproduces both token mix-ups before the fix.
+It and the cache replay reproduction pass ten race-enabled repetitions after
+the fix.
+
+Codex and xAI keepalive tests could send completion and close their connections
+before the held upload finished. The test servers now wait for the request after
+receiving the pong. Session, sessionless, and Codex nonstream cases pass 30
+race-enabled repetitions. No production keepalive behavior changes.
+
+New durable-affinity tests cover both original and nested token selection,
+delayed results after the unused token changes, and replaced-token results.
+401 and generic 429 retain ownership. Only confirmed model or credential quota
+for a current token permits migration. Restarts on another model retain the
+saved owner. These cases pass five race-enabled repetitions.
+
+Validation: the server build and nine image-retention tests pass. The full normal
+and race suites fail only the known local multicast discovery integration test
+after these fixes. No data races remain in the final run. The previously seen
+WebSocket replay-close test failed once during validation, then passed 30 focused
+race-enabled repetitions. Earlier usage-context, Git-storage, and Home
+cancellation fixes remain in place. The isolated GHCR publisher and
+latest-plus-two-previous build retention remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

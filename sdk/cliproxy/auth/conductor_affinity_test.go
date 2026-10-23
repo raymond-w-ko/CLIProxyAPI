@@ -1176,3 +1176,92 @@ func TestDurableAffinityRefreshPreservesConfirmedModelQuota(t *testing.T) {
 		t.Fatalf("persisted replacement = %q, want %q", got, backup.ID)
 	}
 }
+
+func TestDurableAffinityCodexClientTokenPartitions(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, ua := range []string{"codex-tui/0.154.0", "curl/8"} {
+		for _, tc := range []struct {
+			name            string
+			status          int
+			code            string
+			credentialScope bool
+			replaceToken    bool
+			migrate         bool
+		}{
+			{name: "401", status: 401},
+			{name: "generic 429", status: 429},
+			{name: "model quota", status: 429, code: ErrorCodeModelQuota, migrate: true},
+			{name: "credential quota", status: 429, credentialScope: true, migrate: true},
+			{name: "replaced token model quota", status: 429, code: ErrorCodeModelQuota, replaceToken: true},
+			{name: "replaced token credential quota", status: 429, credentialScope: true, replaceToken: true},
+		} {
+			t.Run(ua+"/"+tc.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "bindings.json")
+				ids := []string{t.Name() + "-a", t.Name() + "-b"}
+				newManager := func() *Manager {
+					selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+					t.Cleanup(selector.Stop)
+					m := NewManager(nil, selector, nil)
+					m.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+					for _, id := range ids {
+						_, errRegister := m.Register(WithSkipPersist(context.Background()), &Auth{
+							ID: id, Provider: "codex", Status: StatusActive,
+							Metadata: map[string]any{"access_token": "outer-token", "use_siwc": true,
+								"siwc": map[string]any{"access_token": "siwc-token"}},
+						})
+						if errRegister != nil {
+							t.Fatal(errRegister)
+						}
+						registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model-one"}, {ID: "model-two"}})
+						t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+					}
+					return m
+				}
+				m := newManager()
+				opts := durableTestOptions()
+				opts.Headers.Set("User-Agent", ua)
+				opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+				before, _, _, errPick := m.pickNextMixed(context.Background(), []string{"codex"}, "model-one", opts, nil)
+				if errPick != nil {
+					t.Fatal(errPick)
+				}
+				delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+				updated := before.Clone()
+				// Rotate the unused token, or both tokens for the stale-result cases.
+				if ua == "codex-tui/0.154.0" || tc.replaceToken {
+					updated.Metadata["siwc"].(map[string]any)["access_token"] = "new-siwc-token"
+				}
+				if ua == "curl/8" || tc.replaceToken {
+					updated.Metadata["access_token"] = "new-outer-token"
+				}
+				current, errUpdate := m.Update(WithSkipPersist(context.Background()), updated)
+				if errUpdate != nil || current.CredentialVersion <= before.CredentialVersion {
+					t.Fatalf("credential rotation failed: %v", errUpdate)
+				}
+				cooldown := time.Hour
+				m.recordExecutionResult(context.Background(), Result{
+					AuthID: before.ID, Provider: "codex", Model: "model-one", Options: opts,
+					Error: &Error{HTTPStatus: tc.status, Code: tc.code}, RetryAfter: &cooldown,
+					CredentialScope: tc.credentialScope,
+				}, before, false)
+				want := ids[1]
+				if tc.migrate {
+					want = ids[0]
+				}
+				picked, _, _, errPick := m.pickNextMixed(context.Background(), []string{"codex"}, "model-one", opts, nil)
+				if tc.migrate || tc.replaceToken {
+					if errPick != nil || picked == nil || picked.ID != want {
+						t.Fatalf("selected = %v, %v; want %s", picked, errPick, want)
+					}
+				} else if errPick == nil || picked != nil {
+					t.Fatalf("unconfirmed failure bypassed owner: %v, %v", picked, errPick)
+				}
+				restarted := newManager()
+				picked, _, _, errPick = restarted.pickNextMixed(context.Background(), []string{"codex"}, "model-two", opts, nil)
+				if errPick != nil || picked == nil || picked.ID != want {
+					t.Fatalf("restored owner = %v, %v; want %s", picked, errPick, want)
+				}
+			})
+		}
+	}
+}
