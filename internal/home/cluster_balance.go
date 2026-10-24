@@ -25,14 +25,15 @@ type rebalanceInstruction struct {
 }
 
 type clusterBalanceState struct {
-	moving      bool
-	returning   bool
-	target      clusterNode
-	origin      clusterNode
-	request     rebalanceInstruction
-	result      string
-	registered  bool
-	unsupported bool
+	moving           bool
+	returning        bool
+	target           clusterNode
+	origin           clusterNode
+	request          rebalanceInstruction
+	result           string
+	registered       bool
+	unsupported      bool
+	latencySupported bool
 }
 
 func (c *Client) canExecuteRebalanceLocked() bool {
@@ -56,16 +57,28 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 	if errOptions != nil {
 		return "", errOptions
 	}
+	options.Dialer = nil
+	return runCancelableRedisCommand(ctx, options, args...)
+}
+
+// runCancelableRedisCommand owns its pool and preserves any supplied dialer.
+func runCancelableRedisCommand(ctx context.Context, source *redis.Options, args ...any) (string, error) {
+	options := cloneRedisOptions(source)
 	options.ReadTimeout = -1
 	options.WriteTimeout = -1
-	dialer := redis.NewDialer(options)
-	options.Dialer = func(dialCtx context.Context, network, address string) (net.Conn, error) {
-		conn, errDial := dialer(dialCtx, network, address)
+	baseDialer := options.Dialer
+	if baseDialer == nil {
+		baseDialer = redis.NewDialer(options)
+	}
+	options.Dialer = func(dialCtx context.Context, network, dialAddress string) (net.Conn, error) {
+		conn, errDial := baseDialer(dialCtx, network, dialAddress)
 		if errDial != nil {
 			return nil, errDial
 		}
-		// Pool shutdown can wait for a health probe behind an active read.
-		// Close this command's transport directly when its lifetime is canceled.
+		if ctx.Err() != nil {
+			_ = closeUnderlyingTransport(conn)
+			return nil, context.Cause(ctx)
+		}
 		return newPluginSyncCancelableConn(ctx, conn), nil
 	}
 	command := redis.NewClient(options)
@@ -73,12 +86,12 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 	defer func() {
 		stopCancel()
 		if errClose := command.Close(); errClose != nil && ctx.Err() == nil {
-			log.Debugf("Home rebalance transport close failed: %v", errClose)
+			log.Debugf("Home command transport close failed: %v", errClose)
 		}
 	}()
 	raw, errCommand := command.Do(ctx, args...).Text()
 	if errCommand != nil {
-		return "", fmt.Errorf("Home rebalance %v: %w", args[0], errCommand)
+		return "", fmt.Errorf("Home command %v: %w", args[0], errCommand)
 	}
 	return raw, nil
 }
@@ -105,7 +118,8 @@ func (c *Client) syncClusterBalance(ctx context.Context) error {
 			return fmt.Errorf("register Home rebalance: %w", errEnable)
 		}
 		var response struct {
-			OK bool `json:"ok"`
+			OK           bool     `json:"ok"`
+			Capabilities []string `json:"capabilities"`
 		}
 		if errJSON := json.Unmarshal([]byte(raw), &response); errJSON != nil {
 			return fmt.Errorf("decode Home rebalance ENABLE response: %w", errJSON)
@@ -115,6 +129,11 @@ func (c *Client) syncClusterBalance(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.balance.registered = true
+		for _, capability := range response.Capabilities {
+			if capability == clusterLatencyCapability {
+				c.balance.latencySupported = true
+			}
+		}
 		c.mu.Unlock()
 	}
 	if result == "" {

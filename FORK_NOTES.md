@@ -800,6 +800,54 @@ race-enabled repetitions. Earlier usage-context, Git-storage, and Home
 cancellation fixes remain in place. The isolated GHCR publisher and
 latest-plus-two-previous build retention remain unchanged.
 
+## Upstream security, tool replay, and plugin execution update
+
+The merge through `bc064340` (v8.0.42) includes 21 upstream commits, including one
+merge commit. No configuration migration is required for the recommended
+standalone deployment.
+
+- Request log filenames reject traversal sequences and path separators. Plugin
+  HTTP redirects strip credential headers after leaving the original origin,
+  including redirects that later return to it. Redis protocol parsing bounds
+  arrays, strings, and frames, and recovers connection-level panics.
+- Plugin executors now use the canonical thinking pipeline and apply user
+  payload rules last. Token-count responses use token-count translation. Plugin
+  errors can carry retry guidance through normal and streaming responses.
+- Claude tool arguments survive implicitly open empty object schemas. Codex
+  commentary becomes thinking blocks when translated to Claude. Gemini tool
+  signatures account for intervening text, and schema references retain sibling
+  constraints. Antigravity restores nonstream tool signatures and stable stream
+  call indices. Kimi K3.1 Pro variants share thinking replay.
+- Gemini and Vertex preserve finish reasons without content, surface prompt
+  blocks, and detect truncated Chat Completions streams. Gemini model listings
+  include token limits. Interactions usage merging preserves separate reasoning
+  and cached-token accounting.
+
+Three merge conflicts overlapped prior fork fixes. Home now uses upstream's
+stronger synchronous transport cancellation. Git storage recognizes the new
+missing-index sentinel while retaining the fork's path-specific missing-pack
+checks. The corruption fixture uses upstream's explicit repository cleanup.
+
+Home adds cluster latency reporting and probes. Home `main` (`a8d691bc`) supports
+the matching `cpa_latency_swap_v1` capability. To follow the repository's network
+timeout rule, the fork removes the new fixed report and probe deadlines. Reports
+use separate cancellable connections; a blocked operation waits until the Home
+lifetime ends, without closing active dispatch pools. The three-second sample
+validity threshold remains a measurement rule. Cancellation and cadence tests,
+including a simulated five-second report, pass five race-enabled repetitions.
+Durable affinity still rejects Home mode.
+
+New plugin regressions verify that retry guidance on a generic 429 does not
+authorize account migration. Both envelope and structured stream errors retain
+the saved owner after restart on another model. These cases pass five
+race-enabled repetitions. Existing confirmed-quota migration and request-token
+snapshot tests remain intact.
+
+Validation: the server build and nine image-retention tests pass. The final full
+normal and race suites fail only the known local multicast discovery integration
+test. No data races were reported. The isolated GHCR publisher and retention of
+the latest plus two previous builds remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

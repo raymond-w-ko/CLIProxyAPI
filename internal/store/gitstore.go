@@ -1552,7 +1552,7 @@ func rollbackRecoveredGitDirectory(gitDir, backupGitDir string) error {
 }
 
 func isRepositoryCorruptionError(err error) bool {
-	if errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
+	if errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, dotgit.ErrIdxNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
 		return true
 	}
 	// go-git can report a missing pack through its filesystem source instead
