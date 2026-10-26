@@ -848,6 +848,46 @@ normal and race suites fail only the known local multicast discovery integration
 test. No data races were reported. The isolated GHCR publisher and retention of
 the latest plus two previous builds remain unchanged.
 
+## Upstream credential recovery and stream reliability update
+
+The merge through `30780351` (v8.0.43) includes 18 upstream commits, including one
+merge commit. No configuration migration is required for the recommended
+standalone deployment.
+
+- Re-login clears stale token-refresh failures without clearing active quota
+  cooldowns. Persisted auth updates retain their file-snapshot identity, so
+  watcher reloads preserve current runtime state correctly.
+- Duplex WebSocket authorization uses the original requested model and binds
+  later turns to the original caller. Buffered stream errors survive closure of
+  the data channel. Canceled streams report cancellation instead of success.
+- Claude OAuth tool aliases retain caller scope through plugin replay. xAI
+  removes duplicate historical tools. Gemini preserves array item schemas and
+  stream finish reasons. AIStudio translates every event in relay chunks that
+  contain several events. Devin aggregates lightning variants under one model.
+- V8 OAuth login supports an optional proxy override saved with the account.
+  This login-session setting is separate from durable conversation ownership.
+- Vertex credentials without a location now use `global`, formerly
+  `us-central1`. Set a location explicitly if regional routing is required.
+
+Home reconnects now use bounded exponential backoff. Home `main` (`a8d691bc`)
+needs no matching protocol change. The fork's cancellable telemetry transport
+remains intact, and durable affinity still rejects Home mode. One upstream test
+retained its old one-second reconnect limit. The fork aligns it with the new
+backoff, matching adjacent tests. It passes 20 race-enabled repetitions.
+
+The xAI keepalive test conflict uses upstream's upload synchronization and
+retry-safe channel closure, which absorb the prior fork synchronization fix.
+New durable-affinity regressions cover failed refresh followed by re-login,
+generic 429, and confirmed model or credential quota. Only confirmed quota
+permits migration. Another login cannot reclaim the saved session, including
+after restart on another model. These cases pass five race-enabled repetitions.
+
+Validation: the server build and nine image-retention tests pass. The final full
+normal and race suites fail only the known local multicast discovery integration
+test. No data races were reported. The WebSocket replay-close regression passes
+in both suites. The isolated GHCR publisher and retention of the latest plus two
+previous builds remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

@@ -868,6 +868,82 @@ func TestDurableAffinityFileSnapshotPreservesMigrationPolicy(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityReloginPreservesOwnership(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, tc := range []struct {
+		name       string
+		status     int
+		code       string
+		credential bool
+		migrate    bool
+	}{
+		{"refresh failure", 0, "", false, false},
+		{"generic rate limit", 429, "", false, false},
+		{"model quota", 429, ErrorCodeModelQuota, false, true},
+		{"credential quota", 429, "", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, bindingPath)
+			ctx := WithSkipPersist(context.Background())
+			authPath := filepath.Join(t.TempDir(), "claude.json")
+			updateToken := func(token string, expiry time.Time) {
+				t.Helper()
+				snapshot := reloginSnapshot(t, authPath, token, expiry)
+				snapshot.ID = ids[0]
+				if _, errUpdate := m.Update(ctx, snapshot); errUpdate != nil {
+					t.Fatal(errUpdate)
+				}
+			}
+			opts := durableTestOptions()
+			if owner, errPick := durableTestPick(m, "model-one", opts); errPick != nil || owner.ID != ids[0] {
+				t.Fatalf("initial owner = %v, %v", owner, errPick)
+			}
+			updateToken("old", time.Now().Add(-time.Hour))
+			if tc.status != 0 {
+				cooldown := time.Hour
+				current, _ := m.GetByID(ids[0])
+				m.MarkResult(ctx, Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+					Error: &Error{HTTPStatus: tc.status, Code: tc.code}, CredentialScope: tc.credential, RetryAfter: &cooldown,
+					CredentialVersion: current.CredentialVersion, RegistrationEpoch: current.RegistrationEpoch})
+			}
+			m.RegisterExecutor(&unauthorizedRefreshExecutor{id: "claude", refreshErr: errors.New("invalid_grant: refresh token invalid")})
+			m.refreshAuth(ctx, ids[0])
+			if !tc.migrate {
+				if owner, errPick := durableTestPick(m, "model-one", opts); errPick == nil || owner != nil {
+					t.Fatalf("refresh failure bypassed owner: %v, %v", owner, errPick)
+				}
+			}
+			updateToken("new", time.Now().Add(8*time.Hour))
+			recovered, _ := m.GetByID(ids[0])
+			if recovered.RefreshFailures != 0 || !recovered.NextRefreshAfter.IsZero() {
+				t.Fatal("re-login retained refresh backoff")
+			}
+			wantOwner := ids[0]
+			if tc.migrate {
+				wantOwner = ids[1]
+			}
+			owner, errPick := durableTestPick(m, "model-one", opts)
+			if tc.status != 0 && !tc.migrate {
+				if errPick == nil || owner != nil {
+					t.Fatalf("re-login bypassed generic cooldown: %v, %v", owner, errPick)
+				}
+			} else if errPick != nil || owner == nil || owner.ID != wantOwner {
+				t.Fatalf("owner after re-login = %v, %v; want %s", owner, errPick, wantOwner)
+			}
+			// Another login must not reclaim a session that already migrated.
+			updateToken("newer", time.Now().Add(8*time.Hour))
+			restarted, _ := durableTestManager(t, bindingPath)
+			for _, manager := range []*Manager{m, restarted} {
+				owner, errPick = durableTestPick(manager, "model-two", opts)
+				if errPick != nil || owner == nil || owner.ID != wantOwner {
+					t.Fatalf("saved owner on another model = %v, %v; want %s", owner, errPick, wantOwner)
+				}
+			}
+		})
+	}
+}
+
 func TestDurableAffinityExpiredModelQuotaKeepsOwner(t *testing.T) {
 	m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
 	opts := durableTestOptions()
