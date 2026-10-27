@@ -476,7 +476,10 @@ func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *
 
 func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) {
 	const wantOverride = 1048576
-	const wantDefault = 272000
+	_, fallback, errLoad := loadCodexClientModelTemplates()
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
 
 	resp := BuildResponse([]map[string]any{
 		{"id": "deepseek-v4-flash", "max_context_length": wantOverride},
@@ -494,22 +497,22 @@ func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) 
 	}
 
 	for _, testCase := range []struct {
-		slug string
-		want int
+		slug                 string
+		wantContext, wantMax int
 	}{
-		{slug: "deepseek-v4-flash", want: wantOverride},
-		{slug: "deepseek-v4-pro", want: wantDefault},
-		{slug: "gpt-5.5", want: wantOverride},
+		{slug: "deepseek-v4-flash", wantContext: wantOverride, wantMax: wantOverride},
+		{slug: "deepseek-v4-pro", wantContext: intModelValue(fallback, "context_window"), wantMax: intModelValue(fallback, "max_context_window")},
+		{slug: "gpt-5.5", wantContext: wantOverride, wantMax: wantOverride},
 	} {
 		entry := bySlug[testCase.slug]
 		if entry == nil {
 			t.Fatalf("missing model %q", testCase.slug)
 		}
-		if got := intModelValue(entry, "context_window"); got != testCase.want {
-			t.Errorf("%s context_window = %d, want %d", testCase.slug, got, testCase.want)
+		if got := intModelValue(entry, "context_window"); got != testCase.wantContext {
+			t.Errorf("%s context_window = %d, want %d", testCase.slug, got, testCase.wantContext)
 		}
-		if got := intModelValue(entry, "max_context_window"); got != testCase.want {
-			t.Errorf("%s max_context_window = %d, want %d", testCase.slug, got, testCase.want)
+		if got := intModelValue(entry, "max_context_window"); got != testCase.wantMax {
+			t.Errorf("%s max_context_window = %d, want %d", testCase.slug, got, testCase.wantMax)
 		}
 	}
 }
@@ -927,17 +930,21 @@ func TestCodexClientModelsResponse_UnrelatedCustomProviderRetainsFallback(t *tes
 		t.Fatalf("models = %#v, want one model", resp["models"])
 	}
 
+	_, fallback, errLoad := loadCodexClientModelTemplates()
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
 	entry := models[0]
 	if got := stringModelValue(entry, "slug"); got != "my-unrelated-custom-model" {
 		t.Errorf("slug = %q, want my-unrelated-custom-model", got)
 	}
-	if got := stringModelValue(entry, "comp_hash"); got != "2911" {
-		t.Errorf("comp_hash = %q, want 2911 (from generic gpt-5.5 fallback)", got)
+	if got := stringModelValue(entry, "comp_hash"); got != stringModelValue(fallback, "comp_hash") {
+		t.Errorf("comp_hash = %q, want fallback %q", got, stringModelValue(fallback, "comp_hash"))
 	}
 	if got, _ := entry["supports_search_tool"].(bool); got {
 		t.Errorf("supports_search_tool = %v, want false for non-template fallback", got)
 	}
-	// Fallback model without explicit modalities retains generic gpt-5.5 fallback modalities
+	// Fallback model without explicit modalities retains generic fallback modalities
 	mods, okMods := entry["input_modalities"].([]any)
 	if !okMods || len(mods) != 2 {
 		t.Fatalf("unrelated model input_modalities = %#v, want generic [text image]", entry["input_modalities"])
@@ -1556,9 +1563,9 @@ func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
 			"id":           "devin/gpt-6-astra",
 			"display_name": "GPT-6 Astra",
 		},
-		// 2. Template Devin model without display_name (inherits template "GPT-5.5")
+		// 2. Template Devin model without display_name (inherits template "GPT-6.1-Sol")
 		{
-			"id": "devin/gpt-5.5",
+			"id": "devin/gpt-6.1-sol",
 		},
 		// 3. Non-template Devin model
 		{
@@ -1572,7 +1579,7 @@ func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
 		},
 		// 5. Standard non-Devin model
 		{
-			"id": "gpt-5.5",
+			"id": "gpt-6.1-sol",
 		},
 		// 6. Devin model that already has (Devin) suffix
 		{
@@ -1641,10 +1648,10 @@ func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
 		wantDisplayName string
 	}{
 		{"devin/gpt-6-astra", "GPT-6 Astra (Devin)"},
-		{"devin/gpt-5.5", "GPT-5.5 (Devin)"},
+		{"devin/gpt-6.1-sol", "GPT-6.1-Sol (Devin)"},
 		{"devin/swe-2", "SWE-2 (Devin)"},
 		{"gpt-6-astra", "GPT 6.0 Astra"},
-		{"gpt-5.5", "GPT-5.5"},
+		{"gpt-6.1-sol", "GPT-6.1-Sol"},
 		{"devin/swe-1-7", "SWE-1.7 (Devin)"},
 		{"custom-devin-by-type", "Custom Model (Devin)"},
 		{"custom-devin-by-owned", "Cognition Model (Devin)"},

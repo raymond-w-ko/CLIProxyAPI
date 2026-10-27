@@ -12,10 +12,10 @@ func TestCodexConfigurationUpdateCapability(t *testing.T) {
 		models  func() []*ModelInfo
 		capable []string
 	}{
-		{name: "free", models: GetCodexFreeModels, capable: []string{"gpt-6-luna"}},
-		{name: "team", models: GetCodexTeamModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}},
-		{name: "plus", models: GetCodexPlusModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}},
-		{name: "pro", models: GetCodexProModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}},
+		{name: "free", models: GetCodexFreeModels, capable: []string{"gpt-6-luna", "gpt-6.1-terra"}},
+		{name: "team", models: GetCodexTeamModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"}},
+		{name: "plus", models: GetCodexPlusModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"}},
+		{name: "pro", models: GetCodexProModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"}},
 	} {
 		t.Run(tier.name, func(t *testing.T) {
 			byID := make(map[string]*ModelInfo)
@@ -24,13 +24,13 @@ func TestCodexConfigurationUpdateCapability(t *testing.T) {
 					byID[info.ID] = info
 				}
 			}
-			for _, id := range append([]string{"gpt-5.5"}, tier.capable...) {
+			for _, id := range append([]string{"gpt-5.6-terra"}, tier.capable...) {
 				info := byID[id]
 				if info == nil {
 					t.Errorf("%s is missing", id)
 					continue
 				}
-				want := id != "gpt-5.5"
+				want := id != "gpt-5.6-terra"
 				if info.SupportConfigurationUpdate != want {
 					t.Errorf("%s configuration_update = %v, want %v", id, info.SupportConfigurationUpdate, want)
 				}

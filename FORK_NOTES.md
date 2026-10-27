@@ -942,6 +942,59 @@ pass. The full normal and race suites fail only the known local multicast
 discovery integration test. No data races were reported. The isolated GHCR
 publisher and retention of the latest plus two previous builds remain unchanged.
 
+## Upstream request hardening and WebSocket recovery update
+
+The merge through `ad8bdd3f` (v8.0.45) includes 21 upstream commits, including
+three merge commits. No configuration migration is required for the recommended
+standalone deployment.
+
+- Request logging captures bodies as handlers read them. It no longer eagerly
+  reads unauthenticated bodies. Capture spills to disk after 1 MiB and is capped
+  at 32 MiB. Zstd decoding also bounds its window and decoded output. Unconsumed
+  downstream bodies cannot leave connections indefinitely draining after rejection.
+- Codex `turn_rate_limit_exceeded` is temporary capacity pressure. Its retry hint
+  controls cooldown without marking quota exhaustion. Generic 429 errors and
+  retry hints alone still cannot migrate a durable session.
+- Early Codex WebSocket 429 errors leave the downstream socket open while the
+  manager decides whether another credential is allowed. A lost upstream socket
+  ends the current turn with 502 without replaying it. A continuation that refers
+  to the lost socket receives 409 and needs full context; a fresh full request can
+  reconnect through the existing downstream socket.
+- Authentication and usage code capture request metadata before background work.
+  The conflict resolution adopts upstream's exported request snapshot helper and
+  token capture. It also retains the fork's protection against reading a reused
+  Gin request context during usage publication.
+- Vertex streaming function-call arguments now translate to Claude and OpenAI
+  tool-call streams. The assembler bounds depth, array indices, and output size.
+  Native Vertex thought signatures stay scoped to Vertex targets. Antigravity
+  CAQS signatures tolerate rotating channel IDs while retaining envelope checks.
+- Devin can recover complete bare `apply_patch` arguments after validating their
+  framing. Rejected patches get bounded diagnostics without patch text. xAI image
+  defaults now use the original client payload; user payload rules remain the
+  final semantic step.
+- v8 management supports immediate model-catalog refresh. Source changes and
+  overlapping refreshes cannot publish stale results. Local and Home catalog
+  policies remain respected. Codex templates add workspace/orchestrator flags.
+  GPT-5.5 is removed from the registry tiers; its client-template compatibility
+  entry now uses GPT-6.1-Sol metadata. Tests use current capability fixtures and
+  compare fallback fields with the active template.
+
+New real-socket tests cover capacity, generic 429, and explicit quota errors with
+stream bootstrap buffering both enabled and disabled. Only explicit exhaustion
+moves ownership. Restart and model-change checks confirm the saved owner. These
+tests pass five race-enabled repetitions. The reviewed Vertex object-key shift
+moves private string references and does not mutate JSON bytes.
+
+Home `main` remains at `a8d691bc`. The retry-hint aggregation and attempt-lifetime
+changes need no Home wire-contract change. Durable affinity still rejects Home
+mode and scheduler plugins. Caller isolation, alias handling, child inheritance,
+and quota-only persistent ownership remain intact.
+
+Validation: the server build and nine image-retention tests pass. The final full
+normal and race suites fail only the known local multicast discovery integration
+test. No data races were reported. The isolated GHCR publisher and retention of
+the latest plus two previous builds remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

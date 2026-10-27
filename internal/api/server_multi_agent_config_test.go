@@ -15,7 +15,7 @@ import (
 func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
 	for _, source := range []string{"local", "home"} {
 		t.Run(source, func(t *testing.T) {
-			const modelID = "config-multi-agent-synthetic"
+			const modelID = "gpt-5.6-luna"
 			const clientID = "config-multi-agent-models"
 			modelRegistry := registry.GetGlobalRegistry()
 			modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{{ID: modelID}})
@@ -24,7 +24,7 @@ func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
 			engine := server.engine
 			if source == "home" {
 				server.cfg.Home.Enabled = true
-				client := newHomeCatalogClient(t, `{"codex":[{"id":"config-multi-agent-synthetic"}]}`)
+				client := newHomeCatalogClient(t, `{"codex":[{"id":"gpt-5.6-luna"}]}`)
 				previousHome := home.Current()
 				home.SetCurrent(client)
 				t.Cleanup(func() { home.SetCurrent(previousHome) })
@@ -72,7 +72,7 @@ func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
 						if entry["slug"] != modelID {
 							continue
 						}
-						var want any
+						want := "v1"
 						if tc.want {
 							want = "v2"
 						}
