@@ -371,6 +371,59 @@ func TestDurableAffinityExecutionPaths(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityTruncatedStreamKeepsOwnerAvailable(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%t", partial), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			m.SetRetryConfig(2, 0, 0)
+			opts := durableTestOptions()
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+			if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+				t.Fatal(errPick)
+			}
+			attempts := 0
+			m.RegisterExecutor(&customStreamMockExecutor{
+				identifier: "claude",
+				streamFn: func(_ context.Context, selected *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+					attempts++
+					if selected.ID != ids[1] {
+						t.Errorf("truncated generation dispatched to %s, want %s", selected.ID, ids[1])
+					}
+					chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+					if partial {
+						chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: partial\n\n")}
+					}
+					chunks <- cliproxyexecutor.StreamChunk{Err: &Error{Code: ErrorCodeStreamTruncated, HTTPStatus: http.StatusBadGateway, Message: "missing terminal frame"}}
+					close(chunks)
+					return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+				},
+			})
+			stream, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "model-one"}, durableTestOptions())
+			if stream != nil {
+				for chunk := range stream.Chunks {
+					if chunk.Err != nil {
+						errStream = chunk.Err
+					}
+				}
+			}
+			if !isStreamTruncatedError(errStream) || statusCodeFromError(errStream) != http.StatusBadGateway || attempts != 1 {
+				t.Fatalf("truncated stream: attempts=%d error=%v", attempts, errStream)
+			}
+			restarted, _ := durableTestManager(t, path)
+			for _, manager := range []*Manager{m, restarted} {
+				for _, model := range []string{"model-one", "model-two"} {
+					owner, errPick := durableTestPick(manager, model, durableTestOptions())
+					if errPick != nil || owner == nil || owner.ID != ids[1] {
+						t.Fatalf("truncation cooled or changed saved owner on %s: %v, %v", model, owner, errPick)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestDurableAffinityTransportRetryUsesSameOwner(t *testing.T) {
 	for _, tc := range []struct {
 		name string

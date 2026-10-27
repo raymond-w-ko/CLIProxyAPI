@@ -888,6 +888,60 @@ test. No data races were reported. The WebSocket replay-close regression passes
 in both suites. The isolated GHCR publisher and retention of the latest plus two
 previous builds remain unchanged.
 
+## Upstream compression, Claude 5.5, and stream completion update
+
+The merge through `1f917e77` (v8.0.44) includes 17 upstream commits, including one
+merge commit. No configuration migration is required for the recommended
+standalone deployment.
+
+- HTTP responses now use negotiated gzip or zstd compression by default,
+  including incremental event streams. Disable it with
+  `server.response-compression.enabled: false` if needed. Negotiated outbound
+  Codex and xAI WebSocket compression is also enabled by default; its shared
+  switch is `upstream.codex.websocket-compression`. The same switch controls
+  compression on new downstream Responses WebSocket connections.
+- Codex request-body compression remains opt-in through
+  `upstream.codex.upstream-request-compression`. Eligible OAuth requests use
+  zstd only when it reduces size. A 400 or 415 response triggers one plaintext
+  retry on the same account, using the already finalized payload. API-key and
+  Sign in with ChatGPT requests remain uncompressed. Response decoding now uses
+  a shared helper for gzip, deflate, Brotli, and zstd.
+- Claude 5.5 forced tool choices become `auto` before thinking preparation.
+  This avoids rejected requests but does not guarantee a tool call. Antigravity
+  Claude 5.5 output schemas become best-effort prompt instructions. User payload
+  rules remain the final semantic step.
+- Codex commentary survives round trips through Claude thinking blocks using an
+  internal marker. Consumers remove the marker before upstream requests.
+  Claude reasoning usage maps to OpenAI reasoning-token usage.
+- Truncated accepted Gemini and Vertex streams still report 502, but no longer
+  cool the credential or replay the generation. Cancellation before the first
+  stream chunk is reported correctly. Gemini and Antigravity Interactions emit
+  the final `[DONE]` marker after usage; Antigravity also accepts bare content
+  block lists without dropping attachments.
+- Browser preflight responses explicitly allow Authorization. Plugin schema 7
+  supports opting out of request bodies per interception phase. Scheduler
+  selection IDs now match usage records. Old plugin schemas retain body delivery.
+- Optional LAN discovery uses the draft AI gateway TXT format and bounded
+  per-interface caches for split DNS responses. Legacy CPA records remain
+  supported. Management advertisement is deprecated and ignored.
+
+The error-code conflict retains both the fork's confirmed model-quota marker
+and upstream's truncated-stream marker. Existing quota-only ownership, caller
+isolation, child inheritance, restart persistence, and incompatible-route guards
+remain intact. New tests cover truncation before and after partial output with
+retries enabled: one dispatch, no cooldown, and the same saved owner on both
+models after restart. These tests pass five race-enabled repetitions.
+
+Home `main` remains at `a8d691bc`. The selection-ID cleanup changes no Home wire
+contract and needs no corresponding Home change. Durable affinity still rejects
+Home mode and scheduler plugins. Prior usage-context, token-snapshot, Git-storage,
+Home cancellation, and reconnect-test fixes remain in place.
+
+Validation: the server build, full auth package, and nine image-retention tests
+pass. The full normal and race suites fail only the known local multicast
+discovery integration test. No data races were reported. The isolated GHCR
+publisher and retention of the latest plus two previous builds remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
