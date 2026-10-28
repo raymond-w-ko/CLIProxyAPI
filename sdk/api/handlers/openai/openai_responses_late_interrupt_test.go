@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,16 +18,21 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
 // A delayed control frame must not queue an error for the next create, nor
 // cancel its response when the old response ID is repeated during that turn.
+// Neither interrupts nor switching transport may change the durable account owner.
 func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var connections atomic.Int32
 	httpCanceled := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer synthetic-key" {
+			t.Error("interrupt or transport change dispatched to the alternate account")
+		}
 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			w.Header().Set("Content-Type", "text/event-stream")
 			if _, errWrite := fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r-http\"}}\n\n"); errWrite != nil {
@@ -84,7 +90,15 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 	defer upstream.Close()
 	cfg := &config.Config{}
 	cfg.RequestLog = true
-	manager := coreauth.NewManager(nil, nil, nil)
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	newSelector := func() *coreauth.SessionAffinitySelector {
+		selector := coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+			File: bindingPath, Fallback: &coreauth.FillFirstSelector{},
+		})
+		t.Cleanup(selector.Stop)
+		return selector
+	}
+	manager := coreauth.NewManager(nil, newSelector(), nil)
 	manager.SetConfig(cfg)
 	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 	const authID = "late-interrupt-integration"
@@ -96,8 +110,18 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 	if errRegister != nil {
 		t.Fatal(errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
-	defer registry.GetGlobalRegistry().UnregisterClient(authID)
+	const alternateID = authID + "-alternate"
+	const otherModel = model + "-other"
+	if _, errAlternate := manager.Register(context.Background(), &coreauth.Auth{
+		ID: alternateID, Provider: "codex", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"api_key": "alternate-key", "base_url": upstream.URL, "websockets": "true"},
+	}); errAlternate != nil {
+		t.Fatal(errAlternate)
+	}
+	for _, id := range []string{authID, alternateID} {
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}, {ID: otherModel}})
+		defer registry.GetGlobalRegistry().UnregisterClient(id)
+	}
 	handler := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
 	timelines := make(chan string, 1)
 	router := gin.New()
@@ -109,7 +133,8 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 	})
 	downstream := httptest.NewServer(router)
 	defer downstream.Close()
-	client, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
+	sessionHeaders := http.Header{"X-Session-Id": {"late-interrupt-durable-session"}}
+	client, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", sessionHeaders)
 	if errDial != nil {
 		t.Fatal(errDial)
 	}
@@ -186,6 +211,26 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("interrupt timeline was not finalized")
+	}
+	// Prefer the alternate account after restart. Only the saved binding can
+	// retain the original owner, including when the client requests another model.
+	restarted := coreauth.NewManager(nil, newSelector(), nil)
+	restarted.SetConfig(cfg)
+	restarted.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
+	for _, id := range []string{authID, alternateID} {
+		auth, _ := manager.GetByID(id)
+		if id == alternateID {
+			auth.Attributes["priority"] = "100"
+		}
+		if _, errRestore := restarted.Register(context.Background(), auth); errRestore != nil {
+			t.Fatal(errRestore)
+		}
+	}
+	for _, requestedModel := range []string{model, otherModel} {
+		owner, errSelect := restarted.SelectAuth(context.Background(), "codex", requestedModel, coreexecutor.Options{Headers: sessionHeaders})
+		if errSelect != nil || owner == nil || owner.ID != authID {
+			t.Fatalf("restored owner on %s = %v, %v; want %s", requestedModel, owner, errSelect, authID)
+		}
 	}
 }
 

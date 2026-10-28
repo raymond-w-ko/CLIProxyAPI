@@ -995,6 +995,58 @@ normal and race suites fail only the known local multicast discovery integration
 test. No data races were reported. The isolated GHCR publisher and retention of
 the latest plus two previous builds remain unchanged.
 
+## Upstream compression reuse and interrupt lifecycle update
+
+The merge through `9717e325` (v8.0.46) includes 19 upstream commits, including six
+merge commits. No configuration migration is required for the recommended
+standalone deployment.
+
+- Downstream gzip and zstd encoders are reused across responses. Zstd uses a
+  1 MiB window and lower-memory mode. Finished encoders drop their response-writer
+  reference before returning to the pool. Open streams still retain encoder
+  memory, and usage depends on prior pool activity; this is not a fixed small
+  memory bound per stream.
+- Upstream zstd decoding uses one synchronous decoder. Unlabeled response bodies
+  defer compression detection until the first read. Ordinary text can flow after
+  its first byte without waiting for four bytes. No generation timeout is added.
+- Model registration indexes web-search support per model and provider. This
+  replaces repeated scans of every client under the registry write lock. Tests
+  compare indexed results with the former scan through registration, replacement,
+  provider changes, capability updates, and removal.
+- Standard Responses clients no longer receive private `response.metadata`
+  events over HTTP streams or WebSockets. Codex clients retain them. Server-sent
+  event framing handles split fields and missing separators while preserving
+  JSON text that resembles field names. Recovery removes only newlines that the
+  framer itself inserted at chunk boundaries.
+- WebSocket interrupts target the active response. Unknown targets cannot fall
+  through to local HTTP cancellation, including during upstream disconnects.
+  Terminal events close the interrupt window before downstream delivery. Already
+  claimed local frames receive an answer instead of being silently discarded.
+  The conflict resolution adopts this broader upstream lifecycle guard in place
+  of the fork's older completion-only guard.
+
+The fork's interrupt regression now uses two eligible accounts and a durable
+binding file. Late and repeated interrupts, a subsequent create, and a switch to
+HTTP retain the original account. After restart, that account remains the owner
+on two models even when the alternative has higher selection priority. This test
+and the related unknown-target, disconnect, and terminal-window regressions pass
+five race-enabled repetitions.
+
+Upstream's equivalent catalog fixture fixes and reviewed Vertex key-shift entry
+replace the overlapping fork variants. The configuration reload tests retain the
+fork's v1 template so enabling and disabling the option must visibly change the
+returned value. Persistent quota-only ownership, caller isolation, child
+inheritance, and unsupported-route guards remain unchanged.
+
+Home `main` remains at `a8d691bc`. No Home protocol change is needed for this batch.
+Durable affinity still rejects Home mode and scheduler plugins.
+
+Validation: the server build and nine image-retention tests pass. Full normal
+and race suites fail only the known local multicast discovery integration test.
+After strengthening the fork regression, the full OpenAI handler package passes
+again with and without race detection. No data races were reported. The isolated
+GHCR publisher still retains the latest plus two previous builds.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
