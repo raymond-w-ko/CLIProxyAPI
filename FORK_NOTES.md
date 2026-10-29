@@ -1047,6 +1047,46 @@ After strengthening the fork regression, the full OpenAI handler package passes
 again with and without race detection. No data races were reported. The isolated
 GHCR publisher still retains the latest plus two previous builds.
 
+## Upstream plugin body patching and tool-search ID update
+
+The merge through `90c447d3` (v8.0.47) includes five upstream commits, including
+one merge commit. The merge is conflict-free. No configuration migration is
+required for the recommended standalone deployment.
+
+- Plugin schema 8 supports raw request-body delivery and byte-range edits before
+  or after credential selection. The host checks edit bounds, overlap, and final
+  JSON validity before accepting a patch. Invalid edits leave the current body
+  intact. In-process plugins still receive isolated body copies; RPC paths avoid
+  redundant copies and JSON/Base64 wrapping when raw patching is enabled.
+- Frontend authentication plugins can opt out of request-body delivery on schema
+  7 or later. This skips reading and decompressing the body during authentication.
+  Older schemas and plugins without the option retain their existing behavior.
+- Codex duplex WebSocket follow-up creates, appends, and steering messages now
+  run both request-interceptor phases. Header removal and replacement propagate
+  between the phases. Terminated requests return an error without sending the
+  frame upstream. Follow-up messages retain the bound credential, and user
+  payload rules still run after the plugin edits and built-in preparation.
+- Gemini and Antigravity tool-search calls use the Responses item-ID prefix
+  `tsc_`. Codex input cleanup also normalizes older `ts_` IDs and handles
+  collisions between normalized and existing IDs.
+
+The follow-up interceptor regression now uses two eligible accounts and durable
+storage. It checks the initial create and subsequent create, append, and steer
+frames. User payload overrides and filters win over plugin-written fields. A
+fresh manager restores the same owner on two models even when the alternative
+account has higher priority. The regression passes five race-enabled repetitions.
+
+Quota-only migration, caller isolation, child inheritance, restart persistence,
+and unsupported-route guards remain unchanged. Home `main` remains at
+`a8d691bc`; this batch changes no Home wire contract. Durable affinity continues
+to reject Home mode and scheduler plugins.
+
+Validation: the server build and nine image-retention tests pass. The full normal
+and race suites fail only the known local multicast discovery integration test.
+After strengthening the follow-up regression, the full OpenAI handler package
+passes with and without race detection. No data races were reported. The isolated
+GHCR publisher and retention of the latest plus two previous builds are unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
