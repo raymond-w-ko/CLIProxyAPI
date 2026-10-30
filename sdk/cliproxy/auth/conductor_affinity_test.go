@@ -131,35 +131,44 @@ func TestDurableAffinityFailurePolicy(t *testing.T) {
 }
 
 func TestDurableAffinityTerminalUnauthorizedKeepsOwner(t *testing.T) {
-	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
-	path := filepath.Join(t.TempDir(), "bindings.json")
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
-	t.Cleanup(selector.Stop)
-	m.SetSelector(selector)
-	executor.refreshErr = errors.New("invalid_grant: refresh token invalid")
-	opts := durableTestOptions()
-	for i := 0; i < 2; i++ {
-		if _, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts); errExecute == nil {
-			t.Fatal("terminal unauthorized owner unexpectedly succeeded through another account")
-		}
-	}
-	if calls := executor.ExecuteCalls(); len(calls) != 1 || calls[0] != primary.ID {
-		t.Fatalf("execution bypassed terminal owner: %v", calls)
-	}
-	if calls := executor.RefreshCalls(); calls != 1 {
-		t.Fatalf("refresh calls = %d, want 1", calls)
-	}
-	owner, ok := m.GetByID(primary.ID)
-	if !ok || !hasUnauthorizedAuthFailure(owner) {
-		t.Fatal("owner did not retain terminal unauthorized state")
-	}
-	store := loadDurableSessions(path)
-	if store.err != nil {
-		t.Fatal(store.err)
-	}
-	sessionID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	if got := store.owner(durableSessionKey("codex", sessionID, opts)); got != primary.ID {
-		t.Fatalf("persisted owner = %q, want %q", got, primary.ID)
+	for _, refreshFailure := range []string{
+		"invalid_grant: refresh token invalid",
+		"refresh_token_reused",
+		"refresh_token_expired",
+		"token_revoked",
+	} {
+		t.Run(refreshFailure, func(t *testing.T) {
+			m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+			t.Cleanup(selector.Stop)
+			m.SetSelector(selector)
+			executor.refreshErr = errors.New(refreshFailure)
+			opts := durableTestOptions()
+			for i := 0; i < 2; i++ {
+				if _, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts); errExecute == nil {
+					t.Fatal("terminal unauthorized owner unexpectedly succeeded through another account")
+				}
+			}
+			if calls := executor.ExecuteCalls(); len(calls) != 1 || calls[0] != primary.ID {
+				t.Fatalf("execution bypassed terminal owner: %v", calls)
+			}
+			if calls := executor.RefreshCalls(); calls != 1 {
+				t.Fatalf("refresh calls = %d, want 1", calls)
+			}
+			owner, ok := m.GetByID(primary.ID)
+			if !ok || !hasUnauthorizedAuthFailure(owner) || !owner.RequiresSignIn {
+				t.Fatal("owner did not retain terminal unauthorized state")
+			}
+			store := loadDurableSessions(path)
+			if store.err != nil {
+				t.Fatal(store.err)
+			}
+			sessionID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+			if got := store.owner(durableSessionKey("codex", sessionID, opts)); got != primary.ID {
+				t.Fatalf("persisted owner = %q, want %q", got, primary.ID)
+			}
+		})
 	}
 }
 
@@ -1017,46 +1026,52 @@ func TestDurableAffinityExpiredModelQuotaKeepsOwner(t *testing.T) {
 func TestDurableAffinityModelQuotaSurvivesLateSuccess(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for _, dispatch := range []string{"unstamped", "before quota", "after quota"} {
-		for _, terminalUnauthorized := range []bool{false, true} {
-			t.Run(fmt.Sprintf("dispatch=%s/terminalUnauthorized=%t", dispatch, terminalUnauthorized), func(t *testing.T) {
-				m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
-				opts := durableTestOptions()
-				if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
-					t.Fatal(errPick)
-				}
-				var successSeq uint64
-				if dispatch == "before quota" {
-					successSeq = m.nextExecutionSeq()
-				}
-				cooldown := time.Hour
-				m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
-					Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &cooldown, ExecutionSeq: m.nextExecutionSeq()})
-				if dispatch == "after quota" {
-					successSeq = m.nextExecutionSeq()
-				}
-				if terminalUnauthorized {
-					m.mu.Lock()
-					owner := m.auths[ids[0]]
-					owner.Unavailable = true
-					owner.Status = StatusError
-					owner.LastError = &Error{Code: "unauthorized", HTTPStatus: http.StatusUnauthorized}
-					owner.NextRefreshAfter = time.Time{}
-					owner.NextRetryAfter = time.Time{}
-					m.mu.Unlock()
-				}
-				// Explicit model exhaustion keeps its deadline even when a later dispatch
-				// succeeds. The generic cooldown watermark must not weaken this rule.
-				m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Success: true, ExecutionSeq: successSeq})
-				if terminalUnauthorized {
-					owner, _ := m.GetByID(ids[0])
-					if !hasUnauthorizedAuthFailure(owner) {
-						t.Fatal("late success revived terminal unauthorized credential")
+		for _, completedResponse := range []bool{false, true} {
+			for _, terminalUnauthorized := range []bool{false, true} {
+				t.Run(fmt.Sprintf("dispatch=%s/completed=%t/terminalUnauthorized=%t", dispatch, completedResponse, terminalUnauthorized), func(t *testing.T) {
+					m, ids := durableTestManager(t, filepath.Join(t.TempDir(), "bindings.json"))
+					opts := durableTestOptions()
+					if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+						t.Fatal(errPick)
 					}
-				}
-				if a, errPick := durableTestPick(m, "model-one", opts); errPick != nil || a.ID != ids[1] {
-					t.Fatalf("late success erased confirmed exhaustion: %v, %v", a, errPick)
-				}
-			})
+					var successSeq uint64
+					if dispatch == "before quota" {
+						successSeq = m.nextExecutionSeq()
+					}
+					cooldown := time.Hour
+					m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+						Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &cooldown, ExecutionSeq: m.nextExecutionSeq()})
+					if dispatch == "after quota" {
+						successSeq = m.nextExecutionSeq()
+					}
+					if terminalUnauthorized {
+						m.mu.Lock()
+						owner := m.auths[ids[0]]
+						owner.Unavailable = true
+						owner.Status = StatusError
+						owner.LastError = &Error{Code: "unauthorized", HTTPStatus: http.StatusUnauthorized}
+						owner.NextRefreshAfter = time.Time{}
+						owner.NextRetryAfter = time.Time{}
+						m.mu.Unlock()
+					}
+					// Explicit model exhaustion keeps its deadline even when a later dispatch
+					// succeeds. The generic cooldown watermark must not weaken this rule.
+					m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Success: true, CompletedResponse: completedResponse, ExecutionSeq: successSeq})
+					ownerAfterSuccess, _ := m.GetByID(ids[0])
+					if ownerAfterSuccess.InferenceVerified {
+						t.Fatal("late success verified a credential with confirmed quota exhaustion")
+					}
+					if terminalUnauthorized {
+						owner, _ := m.GetByID(ids[0])
+						if !hasUnauthorizedAuthFailure(owner) {
+							t.Fatal("late success revived terminal unauthorized credential")
+						}
+					}
+					if a, errPick := durableTestPick(m, "model-one", opts); errPick != nil || a.ID != ids[1] {
+						t.Fatalf("late success erased confirmed exhaustion: %v, %v", a, errPick)
+					}
+				})
+			}
 		}
 	}
 }

@@ -1087,6 +1087,53 @@ After strengthening the follow-up regression, the full OpenAI handler package
 passes with and without race detection. No data races were reported. The isolated
 GHCR publisher and retention of the latest plus two previous builds are unchanged.
 
+## Upstream structured usage and credential recovery update
+
+The merge through `dbb70621` (v8.0.48) includes 27 upstream commits, including
+six merge commits. No configuration migration is required for the recommended
+standalone deployment.
+
+- Usage records now include provider-reported cache lifetimes, tool counts,
+  modality tokens, image details, and costs where available. Claude streaming
+  preserves observed usage on failures and handles multiline events. The fork's
+  protection against reading a reused Gin request context remains in place.
+- Codex credential recovery distinguishes loaded credentials, completed inference,
+  and verified renewal. Rejected refresh grants require sign-in; an unexpired,
+  accepted access token can remain usable. Targeted OAuth recovery rejects a
+  different account. Inference verification is explicit and account-pinned.
+- Cooldown files now stay beside credential files when the auth directory is
+  relative. OpenAI-compatible streams that end without the required completion
+  marker no longer put an otherwise healthy credential into cooldown.
+- Responses WebSockets no longer retain deferred request bodies for error-only
+  logging. AI Studio reassembles fragmented server-sent events. Home mode stops
+  exposing the unsupported AI Studio WebSocket gateway.
+- Codex expands recognized proxy-generated compaction summaries before forwarding
+  them. Native OpenAI compaction items remain intact. Expansion precedes user
+  payload rules, including WebSocket follow-up frames; upstream adds regression
+  coverage for this ordering and rejects corrupt recognized summaries locally.
+- Claude inline tool additions translate to OpenAI and Codex tools. Gemini and
+  Antigravity preserve Claude tool-result error flags. Plugin schema 9 permits
+  one model registrar to publish catalogs for multiple providers.
+
+One conflict in `MarkResult` combined the new inference-verification state with
+this fork's quota protection. Active account and explicit model quota blocks
+survive late successes. A completed response also cannot newly mark a credential
+as inference-verified while its explicit model quota block remains active.
+The regression covers unstamped, earlier, and later dispatches, with and without
+terminal authentication failure and completed-response markers. The durable
+ownership regression now covers invalid, reused, expired, and revoked refresh
+grants. These cases pass five race-enabled repetitions without account migration.
+
+Persistent quota-only ownership, caller isolation, child inheritance, and
+unsupported-route guards remain intact. Home `main` remains at `a8d691bc`; no
+companion wire-protocol update is required. Durable affinity still rejects Home
+mode, scheduler plugins, and routes across multiple actual providers.
+
+Validation: the server build and nine image-retention tests pass. The full normal
+and race suites fail only the known local multicast discovery integration test.
+No data races were reported. The isolated GHCR publisher and retention of the
+latest plus two previous builds remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
