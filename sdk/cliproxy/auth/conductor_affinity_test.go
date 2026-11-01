@@ -91,6 +91,8 @@ func TestDurableAffinityFailurePolicy(t *testing.T) {
 			}{
 				{"transient", 503, false, false},
 				{"unauthorized", 401, false, false},
+				{"payment required", 402, false, false},
+				{"credit balance", 400, false, false},
 				{"temporary rate limit", 429, false, false},
 				{"confirmed quota", 429, true, true},
 			} {
@@ -100,9 +102,13 @@ func TestDurableAffinityFailurePolicy(t *testing.T) {
 					if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
 						t.Fatal(errPick)
 					}
+					message := tc.name
+					if tc.name == "credit balance" {
+						message = `{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}`
+					}
 					cooldown := time.Hour
 					m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Options: opts,
-						Error: &Error{HTTPStatus: tc.code, Message: tc.name}, CredentialScope: tc.scope, RetryAfter: &cooldown})
+						Error: &Error{HTTPStatus: tc.code, Message: message}, CredentialScope: tc.scope, RetryAfter: &cooldown})
 					// The tried set must not allow ordinary errors to escape the durable owner.
 					a, _, _, errPick := m.pickNextMixed(context.Background(), []string{"claude"}, "model-one", opts, map[string]struct{}{ids[0]: {}})
 					if tc.migrate {
@@ -159,6 +165,28 @@ func TestDurableAffinityTerminalUnauthorizedKeepsOwner(t *testing.T) {
 			owner, ok := m.GetByID(primary.ID)
 			if !ok || !hasUnauthorizedAuthFailure(owner) || !owner.RequiresSignIn {
 				t.Fatal("owner did not retain terminal unauthorized state")
+			}
+			// A manual refresh that returns unchanged rejected credentials must
+			// neither restore availability nor bypass the persisted owner.
+			executor.mu.Lock()
+			executor.refreshErr = nil
+			executor.refreshTokens = map[string]string{primary.ID: "stale-access-token"}
+			executor.mu.Unlock()
+			if _, errRefresh := m.ForceRefreshAuth(context.Background(), primary.ID); errRefresh == nil {
+				t.Fatal("manual refresh accepted unchanged rejected credentials")
+			}
+			owner, _ = m.GetByID(primary.ID)
+			if !owner.RequiresSignIn || !owner.Unavailable || owner.RejectedAccessToken != "stale-access-token" {
+				t.Fatal("manual refresh revived terminal owner")
+			}
+			reloadedSelector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+			t.Cleanup(reloadedSelector.Stop)
+			m.SetSelector(reloadedSelector)
+			if _, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts); errExecute == nil {
+				t.Fatal("binding reload bypassed terminal owner after manual refresh")
+			}
+			if calls := executor.ExecuteCalls(); len(calls) != 1 || calls[0] != primary.ID {
+				t.Fatalf("manual refresh dispatched through a rejected or alternate account: %v", calls)
 			}
 			store := loadDurableSessions(path)
 			if store.err != nil {

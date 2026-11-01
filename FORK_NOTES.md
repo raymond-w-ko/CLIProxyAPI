@@ -1134,6 +1134,62 @@ and race suites fail only the known local multicast discovery integration test.
 No data races were reported. The isolated GHCR publisher and retention of the
 latest plus two previous builds remain unchanged.
 
+## Upstream connection pools, plugin streams, and refresh quarantine update
+
+The conflict-free merge through `f7331b51` (v8.0.50) includes 29 upstream commits,
+including three merge commits. No configuration migration is required for the
+recommended Claude OAuth deployment.
+
+- API-key credentials can opt into connection reuse with `connection-pool` at
+  group or key level. Omitted settings preserve the existing behavior. Pools
+  isolate credentials, proxy credentials, and service instances. Configuration
+  reload retires idle connections while active requests finish. This setting
+  does not enable pooling for OAuth credentials. TCP keepalive probes detect
+  dead connections; the change adds no active-response deadline.
+- Codex manual refresh no longer makes a rejected credential available when the
+  executor returns unchanged tokens. Sign-in requirements and rejected access
+  tokens remain in force until actual credential recovery.
+- Anthropic low-credit HTTP 400 errors receive payment-required cooldown handling
+  instead of caller-error handling. This does not broaden this fork's migration
+  policy: payment errors still retain the durable owner because they are not
+  classified as confirmed account or model quota exhaustion.
+- Plugin schema 10 supports multiple OAuth login entries per plugin. Same-format
+  plugin streams now reassemble server-sent events before translation when a
+  native stream translator exists. This fixes doubled framing and fragmented
+  events. Streams without a translator or plugin translation hooks retain their
+  previous pass-through behavior.
+- `client.claude.show-codex-commentary` optionally displays public Codex progress
+  as Claude text while preserving replay markers. It defaults to false. Responses
+  WebSocket replay removes output-only token counts from upstream items while
+  retaining client-provided items. Shortened gateway MCP tool names remain readable.
+- Gemini and Antigravity remove empty system-instruction parts; Antigravity also
+  drops excess tool responses and preserves explicit thinking levels for Claude
+  5.5. Meta adds Muse tool namespaces before final user payload rules. Devin maps
+  compound fast thinking levels to the matching upstream variants.
+- xAI login filenames now include an identity hash to prevent collisions. Existing
+  credential files remain readable. Re-login can migrate a legacy filename and
+  therefore its credential ID. Durable sessions tied to a removed old ID fail
+  closed; this merge does not silently remap those bindings to a new ID. Keep
+  credential IDs stable when recovering existing durable sessions.
+
+The fork regression now forces a manual refresh after invalid, reused, expired,
+and revoked refresh-grant failures. It checks that the rejected owner stays
+unavailable, reloads the saved binding, and confirms that neither the rejected
+account nor an alternate account receives a new inference call. Payment and
+low-credit errors also retain the owner under both ordinary rebind settings.
+These cases pass five race-enabled repetitions.
+
+Persistent quota-only ownership, model-independent bindings, caller isolation,
+and child inheritance remain intact. Home's release worker now sleeps when no
+release is pending. Home `main` remains at `a8d691bc`; its wire contract requires
+no companion change. Durable affinity still rejects Home mode, scheduler plugins,
+and routes across multiple actual providers.
+
+Validation: the server build and all nine image-retention tests pass. The full
+normal and race suites fail only the known local multicast discovery integration
+test. No data races were reported. Only the fork GHCR workflow is enabled; the
+latest image and two previous builds remain the retention policy.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
