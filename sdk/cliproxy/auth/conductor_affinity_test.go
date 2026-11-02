@@ -200,6 +200,78 @@ func TestDurableAffinityTerminalUnauthorizedKeepsOwner(t *testing.T) {
 	}
 }
 
+func TestDurableAffinityCodexWithoutRenewalKeepsOwner(t *testing.T) {
+	ctx := context.Background()
+	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	installSelector := func() {
+		selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: &FillFirstSelector{}})
+		t.Cleanup(selector.Stop)
+		m.SetSelector(selector)
+	}
+	installSelector()
+	opts := durableTestOptions()
+	opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = primary.ID
+	if owner, _, _, errPick := m.pickNextMixed(ctx, []string{"codex"}, model, opts, nil); errPick != nil || owner.ID != primary.ID {
+		t.Fatalf("initial owner = %v, %v", owner, errPick)
+	}
+	opts = durableTestOptions()
+	delete(primary.Metadata, "refresh_token")
+	primary.Metadata["expired"] = time.Now().Add(-time.Hour).Format(time.RFC3339)
+	if _, errUpdate := m.Update(ctx, primary); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	// Neither initial scheduling nor an already queued job may keep trying
+	// automatic renewal without credentials that can perform it.
+	now := time.Now()
+	loop := newAuthAutoRefreshLoop(m, time.Second, 1)
+	loop.rebuild(now)
+	if _, queued := loop.index[primary.ID]; queued {
+		t.Fatal("access-only owner queued for automatic refresh")
+	}
+	loop.upsert(primary.ID, now)
+	loop.handleDueAuth(ctx, now, primary.ID)
+	if _, queued := loop.index[primary.ID]; queued || len(loop.jobs) != 0 {
+		t.Fatal("access-only owner retained a refresh job")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, errExecute := m.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts); errExecute == nil {
+			t.Fatal("rejected access-only owner was bypassed")
+		}
+		installSelector()
+	}
+	if executor.RefreshCalls() != 0 {
+		t.Fatal("access-only owner attempted renewal")
+	}
+	for _, id := range executor.ExecuteCalls() {
+		if id != primary.ID {
+			t.Fatalf("access-only failure migrated to %s", id)
+		}
+	}
+	store := loadDurableSessions(path)
+	sessionID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if store.err != nil || store.owner(durableSessionKey("codex", sessionID, opts)) != primary.ID {
+		t.Fatal("access-only failure changed persisted ownership")
+	}
+	// Installing new credentials restores renewal scheduling and service on
+	// the same account, without assigning the session to the healthy backup.
+	recovered, _ := m.GetByID(primary.ID)
+	recovered.Metadata["access_token"] = "recovered-access-token"
+	recovered.Metadata["refresh_token"] = "restored-refresh-token"
+	recovered.Metadata["expired"] = time.Now().Add(8 * 24 * time.Hour).Format(time.RFC3339)
+	updated, errUpdate := m.Update(ctx, recovered)
+	if errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	if _, scheduled := m.nextRefreshCheckAt(now, updated, time.Second); !scheduled {
+		t.Fatal("restored renewal credentials did not restore scheduling")
+	}
+	response, errExecute := m.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts)
+	if errExecute != nil || string(response.Payload) != primary.ID+":recovered-access-token" {
+		t.Fatalf("recovered owner response = %s, %v", response.Payload, errExecute)
+	}
+}
+
 func TestDurableAffinityRejectedUnexpiredTokenKeepsOwner(t *testing.T) {
 	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
 	path := filepath.Join(t.TempDir(), "bindings.json")

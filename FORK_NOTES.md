@@ -1190,6 +1190,54 @@ normal and race suites fail only the known local multicast discovery integration
 test. No data races were reported. Only the fork GHCR workflow is enabled; the
 latest image and two previous builds remain the retention policy.
 
+## Upstream renewal scheduling and protocol translation update
+
+The conflict-free merge through `7cad1cb7` (v8.0.51) includes 15 upstream commits,
+including three merge commits. The two Muse commits in this history duplicate
+changes already included in the previous merge. No configuration migration is
+required for the recommended Claude OAuth deployment.
+
+- Automatic Codex refresh skips local credentials without a usable renewal
+  credential. The local executor requires the exact `refresh_token` key; a
+  `refreshToken` field does not qualify. SIWC renewal credentials, Home, and
+  runtime refresh evaluators retain their own supported renewal paths. Installing
+  renewal credentials restores scheduling without restarting the refresh loop.
+- Disabled credentials retain the result of a refresh, including timestamps and
+  ineffective-refresh backoff. A pending job marker no longer overwrites that
+  result, and a refresh does not enable a disabled credential.
+- Responses-to-Chat-Completions translation preserves developer message roles and
+  their positions. Gemini translation keeps parallel tool-result batches together
+  across developer or system notices, without consuming or losing the notices.
+- Gemini schema conversion turns valid nonnegative integer strings into numbers
+  for length, item-count, and property-count constraints. It walks schema fields
+  without rewriting ordinary values in defaults or examples. Translation still
+  precedes the executors' final user payload rules.
+- Plugin OAuth entries can expose individual names and logos through schema 10.
+  Plugin-store metadata supports normalized locale keys and sanitized translated
+  display fields. These changes do not alter durable routing or provider scope.
+- Grok Imagine Video 1.5 Lite is available through the video routes. Its model
+  identity and requested resolution survive retrieval, including 1080p. Built-in
+  xAI video models remain present when a remote model catalog omits them.
+
+The new durable regression binds a session before its Codex access token expires
+without renewal credentials. It checks that the owner leaves the automatic
+refresh queue, that requests fail without dispatching to a healthy alternative,
+and that reloading the saved binding retains ownership. Installing new access
+and refresh tokens restores scheduling and service on the same account. The
+regression passes five race-enabled repetitions.
+
+Quota-only migration, model-independent bindings, caller isolation, and child
+inheritance remain intact. Home `main` remains at `a8d691bc`; no companion wire
+change is needed. Durable affinity still rejects Home mode, scheduler plugins,
+and routes across multiple actual providers.
+
+Validation: the server build and nine image-retention tests pass. Normal and
+race validation passes for all packages except the known local multicast
+discovery integration test. The auth package was rerun in full with and without
+race detection after correcting the new test setup to establish ownership before
+expiring its token. No data races were reported. The isolated GHCR publisher and
+retention of the latest plus two previous builds remain unchanged.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
