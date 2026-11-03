@@ -1301,6 +1301,75 @@ repetitions. A separate Claude Opus 5.5 code review found no blocking or
 medium-severity regressions. Its two documentation findings are addressed above.
 Publication still retains the latest image and two previous builds.
 
+## Upstream Claude quota, citation replay, and native client update
+
+The conflict-free merge through `01b24f1f` (v8.0.53) includes 16 upstream
+commits, including one merge commit. This release adds direct Claude fixes.
+It retains the JSON library introduced in v8.0.52. No configuration or binding
+file migration is required for the recommended standalone Claude OAuth setup.
+The v8.0.52 API-key connection-pool identity caveat still applies when upgrading
+from an older build.
+
+- A Fable-only or overage rejection remains model-scoped when the shared weekly
+  window is allowed and both five-hour headers are absent. The fork still
+  requires explicit rejected quota evidence before moving a session. A billing
+  rejection alone does not authorize migration. An explicit Fable reset time
+  still governs that model's cooldown; healthy sibling models remain usable.
+- Replayed Claude web-search citations are removed when their required search
+  results are missing. Cached results are restored before translation decides
+  whether to keep citations. This avoids invalid citation references while
+  preserving the assistant text. Cache scope remains credential/session-specific,
+  and final user payload rules still apply after restoration and cleanup.
+- `upstream.claude.header-defaults.native-entrypoints` can extend the native
+  Claude Code client list, for example with `["t3-code"]`. Recognition still
+  requires the strong request signals. This option preserves a matching client's
+  native request shape instead of adding CLI cloaking. It is opt-in; existing
+  configuration and defaults are unchanged. Device-profile keys separate these
+  explicitly allowed clients.
+- Targeted OAuth re-login now uses the selected credential across built-in
+  providers, preserves its ID and file path, and checks available account and
+  organization identity. It reports storage and runtime adoption separately.
+  This supports restoring a durable owner without creating a replacement ID.
+- Credentials with a rejected, unchanged refresh token no longer spin in the
+  automatic refresh queue. Disabled credentials stay disabled, including after
+  plugin refreshes. A still-valid access token defers the refresh check to its
+  expiration; terminally rejected disabled credentials then leave the queue.
+- Unix plugin loading probes initialization in a subprocess before loading into
+  the server. This catches deterministic load/initialization crashes. It is not
+  isolation for the plugin's later execution.
+- Codex requests preserve output-token limits across supported input formats.
+  Non-Codex catalog routes no longer claim original image-detail support.
+  Gemini receives tool-result images inside the function response. Antigravity
+  filter/safety finishes map to Claude refusal reasons. Devin retains its sealed
+  reasoning items and treats specific request-caused 403 errors as request faults.
+
+The fork regression now exercises missing-five-hour-header model quotas and
+billing-only errors through normal, streaming, token-counting, and both
+compaction paths. It checks migration, retained ownership, model scope, and
+whole-session ownership after a fresh manager reload. Two new upstream cooldown
+assertions were aligned with the fork's existing explicit-reset policy. The
+new refresh test uses the required moego Base64 import. The new citation-pruning
+helper uses a single `ojson.Doc`, as required by the updated repository rules.
+The new targeted OAuth registration test waits for cancelled login pollers with
+a controlled test clock before restoring the global HTTP transport. This fixes a test cleanup data race;
+it does not add production timeouts or wall-clock test sleeps.
+
+Home `main` remains at `a8d691bc`. The device-profile key extension and cached
+search lookup use existing Home KV operations; no companion protocol update is
+needed. Durable mode still rejects Home, scheduler plugins, and routes with
+multiple actual providers. No workflows or active-response deadlines changed.
+Only the isolated fork GHCR publisher remains enabled.
+
+Validation: the server build and nine image-retention tests pass. After fixing
+the test cleanup race and aligning cooldown assertions, the full normal and
+race suites pass all packages except the known local multicast discovery test.
+The quota/ownership regressions pass five race-enabled repetitions, and the
+OAuth registration regression passes ten. The citation helper's translator and
+executor packages also pass normal and race checks after the final document-API
+adjustment. An independent Claude Opus 5.5 review found no actionable regressions
+and reran the key quota, durable-affinity, targeted OAuth, and web-search tests
+successfully. Publication retains the latest image and two rollback builds.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

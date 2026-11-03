@@ -33,8 +33,10 @@ func (e durableClaudeTestExecutor) CountTokens(ctx context.Context, auth *clipro
 
 func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 	for _, mode := range []string{"execute", "stream", "count", "compact", "compact-stream"} {
-		for _, scenario := range []string{"model quota", "both exhausted", "generic 429", "per-minute rate", "overage billing", "model quota with billing"} {
-			t.Run(mode+"/"+scenario, func(t *testing.T) {
+		for _, scenarioName := range []string{"model quota", "both exhausted", "generic 429", "per-minute rate", "overage billing", "model quota with billing", "model quota without 5h", "overage billing without 5h"} {
+			t.Run(mode+"/"+scenarioName, func(t *testing.T) {
+				scenario := strings.TrimSuffix(scenarioName, " without 5h")
+				missing5h := scenario != scenarioName
 				const model = "claude-fable-5-1"
 				var mu sync.Mutex
 				attempts := map[string]int{}
@@ -54,7 +56,9 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 							w.Header().Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(time.Now().Add(4*time.Hour).Unix(), 10))
 						} else if scenario != "overage billing" {
 							w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
-							w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+							if !missing5h {
+								w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+							}
 							w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
 							w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
 							w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
@@ -63,6 +67,9 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 							billingReset := strconv.FormatInt(time.Now().Add(31*24*time.Hour).Unix(), 10)
 							w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 							w.Header().Set("Anthropic-Ratelimit-Unified-Representative-Claim", "overage")
+							if missing5h {
+								w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+							}
 							w.Header().Set("Anthropic-Ratelimit-Unified-Reset", billingReset)
 							w.Header().Set("Anthropic-Ratelimit-Unified-Overage-Reset", billingReset)
 						}
@@ -84,8 +91,9 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					}
 				}))
 				defer server.Close()
+				bindingPath := filepath.Join(t.TempDir(), "bindings.json")
 				selector := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
-					File: filepath.Join(t.TempDir(), "bindings.json"), Fallback: &cliproxyauth.FillFirstSelector{},
+					File: bindingPath, Fallback: &cliproxyauth.FillFirstSelector{},
 				})
 				defer selector.Stop()
 				manager := cliproxyauth.NewManager(nil, selector, nil)
@@ -179,10 +187,41 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 						t.Fatalf("billing reset became a long cooldown: %+v", state)
 					}
 				}
+				if missing5h {
+					failed, _ := manager.GetByID(ids[0])
+					state := failed.ModelStates[model]
+					if failed.Quota.Reason == "credential_quota" || state == nil {
+						t.Fatalf("missing 5h headers caused account-wide exhaustion: %+v", failed)
+					}
+					if got := state.Quota.Reason == cliproxyauth.ErrorCodeModelQuota; got != (scenario == "model quota") {
+						t.Fatalf("model quota classification = %q for %s", state.Quota.Reason, scenario)
+					}
+				}
 				// No account-wide cooldown: a healthy sibling model keeps the current owner.
 				owner, errSelect := manager.SelectAuth(context.Background(), "claude", "claude-opus-5", opts)
 				if errSelect != nil || owner.ID != ids[wantSecond] {
 					t.Fatalf("whole-session owner = %v, %v", owner, errSelect)
+				}
+				// Reload only durable ownership, with healthy credentials. A lost
+				// binding would select the first account after a quota migration.
+				selector.Stop()
+				reloaded := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
+					File: bindingPath, Fallback: &cliproxyauth.FillFirstSelector{},
+				})
+				defer reloaded.Stop()
+				restarted := cliproxyauth.NewManager(nil, reloaded, nil)
+				restarted.RegisterExecutor(durableClaudeTestExecutor{NewClaudeExecutor(&config.Config{})})
+				for i, id := range ids {
+					_, errRegister := restarted.Register(cliproxyauth.WithSkipPersist(context.Background()), &cliproxyauth.Auth{
+						ID: id, Provider: "claude", Attributes: map[string]string{"api_key": []string{"first", "second"}[i], "base_url": server.URL},
+					})
+					if errRegister != nil {
+						t.Fatal(errRegister)
+					}
+				}
+				owner, errSelect = restarted.SelectAuth(context.Background(), "claude", "claude-opus-5", opts)
+				if errSelect != nil || owner.ID != ids[wantSecond] {
+					t.Fatalf("restarted whole-session owner = %v, %v", owner, errSelect)
 				}
 			})
 		}
