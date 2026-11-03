@@ -147,7 +147,7 @@ func TestFinalizeDrainsChunksBeforeWorkerStarts(t *testing.T) {
 		go func() { finalized <- wrapper.Finalize(c) }()
 		// Finalize closes the queue and waits before the worker gets scheduled.
 		synctest.Wait()
-		go wrapper.processStreamingChunks(done)
+		go wrapper.processStreamingChunks(done, chunks, streamWriter)
 		synctest.Wait()
 		if errFinalize := <-finalized; errFinalize != nil {
 			t.Fatal(errFinalize)

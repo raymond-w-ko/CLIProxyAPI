@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -19,7 +20,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // A delayed control frame must not queue an error for the next create, nor
@@ -60,7 +60,7 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 			if errRead != nil {
 				return
 			}
-			if gjson.GetBytes(create, "type").String() != "response.create" {
+			if ojson.GetBytesNoCopy(create, "type").String() != "response.create" {
 				t.Errorf("terminal interrupt reached upstream: %s", create)
 				return
 			}
@@ -75,7 +75,7 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 				if errInterrupt != nil {
 					return
 				}
-				if gjson.GetBytes(interrupt, "response_id").String() != "r2" {
+				if ojson.GetBytesNoCopy(interrupt, "response_id").String() != "r2" {
 					t.Errorf("old interrupt affected active r2: %s", interrupt)
 					return
 				}
@@ -161,7 +161,7 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		if gjson.GetBytes(payload, "type").String() != event || gjson.GetBytes(payload, "response.id").String() != id {
+		if ojson.GetBytesNoCopy(payload, "type").String() != event || ojson.GetBytesNoCopy(payload, "response.id").String() != id {
 			t.Fatalf("expected %s for %s, got %s", event, id, payload)
 		}
 	}
@@ -272,7 +272,7 @@ func TestResponsesInterruptDiagnosticsAreSanitized(t *testing.T) {
 	if errRead != nil {
 		t.Fatal(errRead)
 	}
-	if gjson.GetBytes(payload, "type").String() != "error" {
+	if ojson.GetBytesNoCopy(payload, "type").String() != "error" {
 		t.Fatalf("unknown interrupt must still fail: %s", payload)
 	}
 	if errClose := client.Close(); errClose != nil {

@@ -1,0 +1,73 @@
+{
+  "source": "3cb0bbf9faedb2ce5856b3b16516508113fdec32",
+  "cases": [
+    {
+      "name": "claude header",
+      "payload": "{}",
+      "headers": {
+        "X-Claude-Code-Session-Id": [
+          "baseline-header"
+        ]
+      },
+      "owner": "saved-owner-a"
+    },
+    {
+      "name": "claude legacy metadata",
+      "payload": "{\"metadata\": {\"user_id\": \"user_synthetic_account_synthetic_session_11111111-2222-4333-8444-555555555555\"}}",
+      "owner": "saved-owner-b"
+    },
+    {
+      "name": "claude JSON metadata",
+      "payload": "{\"metadata\": {\"user_id\": \"{\\\"session_id\\\": \\\"baseline-json-metadata\\\"}\"}}",
+      "owner": "saved-owner-a"
+    },
+    {
+      "name": "escaped session key and value",
+      "payload": "{\"session\\u005fid\":\"baseline-\\u00e9\"}",
+      "owner": "saved-owner-b"
+    },
+    {
+      "name": "duplicate session keys",
+      "payload": "{\"session_id\":\"baseline-first\",\"session_id\":\"baseline-second\"}",
+      "owner": "saved-owner-a"
+    },
+    {
+      "name": "prompt cache alias",
+      "payload": "{\"prompt_cache_key\":\"baseline-cache\",\"conversation\":{\"id\":\"baseline-conversation\"}}",
+      "owner": "saved-owner-b"
+    },
+    {
+      "name": "conversation alias reuse",
+      "payload": "{\"conversation\":{\"id\":\"baseline-conversation\"}}",
+      "owner": "saved-owner-b"
+    },
+    {
+      "name": "caller one",
+      "payload": "{\"sessionId\":\"baseline-shared\"}",
+      "caller": "caller-one",
+      "owner": "saved-owner-a"
+    },
+    {
+      "name": "caller two",
+      "payload": "{\"sessionId\":\"baseline-shared\"}",
+      "caller": "caller-two",
+      "owner": "saved-owner-b"
+    }
+  ],
+  "bindings_file": {
+    "version": 1,
+    "bindings": {
+      "02611a419571d8b15f5fa934d1c7ef6750ffb01c86276274cacbdde55a10a396": "saved-owner-b",
+      "193ee56c181e1c61d97e8ba7b2f7ab8a898c4d6a9c28d707eb731bd05972a072": "saved-owner-a",
+      "203b1e122e372ed455e28b32565716c7968353748cc56df26f36224d49dfaf5e": "saved-owner-b",
+      "3815da8b3405481d4ade717c784ef825712ee58a6f48b0eaa160a7461c1f826a": "saved-owner-a",
+      "825bf3245962110e1cafc8249ca7a46115c4cecb502cb4aa395b8c5d8e5d42b2": "saved-owner-b",
+      "b93aaf5a75c3b62664d5f02353c9266133f0eb04c8da66aeb3f2739c5b737c2e": "saved-owner-a",
+      "bb6eb829b38af6e99f70700d321b04d020bf400816fb885d9532acd618e1d5a1": "saved-owner-a",
+      "fc2f86ca9ccbf89a3c48bc394c49e014ff92156b45105e99664c354386c272cb": "saved-owner-b"
+    },
+    "aliases": {
+      "5eab1106ca8e4973050b2dbc312883dabb4aea36a0097d4cf821d827e052275e": "fc2f86ca9ccbf89a3c48bc394c49e014ff92156b45105e99664c354386c272cb"
+    }
+  }
+}
