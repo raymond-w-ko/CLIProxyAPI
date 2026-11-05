@@ -167,7 +167,10 @@ func TestClaudeDurableAffinityAndDateSurviveRestart(t *testing.T) {
 
 func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 	for _, mode := range []string{"execute", "stream", "count", "compact", "compact-stream"} {
-		for _, scenarioName := range []string{"model quota", "both exhausted", "generic 429", "per-minute rate", "overage billing", "model quota with billing", "model quota without 5h", "overage billing without 5h"} {
+		for _, scenarioName := range []string{"model quota", "both exhausted", "generic 429", "per-minute rate", "overage billing", "model quota with billing", "model quota without 5h", "overage billing without 5h", "policy refusal"} {
+			if mode == "count" && scenarioName == "policy refusal" {
+				continue // Token counting does not return assistant stop reasons.
+			}
 			t.Run(mode+"/"+scenarioName, func(t *testing.T) {
 				scenario := strings.TrimSuffix(scenarioName, " without 5h")
 				missing5h := scenario != scenarioName
@@ -183,6 +186,16 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					attempts[key]++
 					mu.Unlock()
 					if key == "first" || scenario == "both exhausted" {
+						if scenario == "policy refusal" {
+							if mode == "stream" {
+								w.Header().Set("Content-Type", "text/event-stream")
+								_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_refusal\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"type\":\"refusal\"}},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+							} else {
+								w.Header().Set("Content-Type", "application/json")
+								_, _ = io.WriteString(w, `{"id":"msg_refusal","type":"message","role":"assistant","content":[],"stop_reason":"refusal","stop_details":{"type":"refusal"},"usage":{"input_tokens":1,"output_tokens":0}}`)
+							}
+							return
+						}
 						if scenario == "generic 429" {
 							w.Header().Set("Retry-After", "3600")
 						} else if scenario == "per-minute rate" {
@@ -284,11 +297,15 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					}
 				} else {
 					var status interface{ StatusCode() int }
-					if !errors.As(errExecute, &status) || status.StatusCode() != 429 {
-						t.Fatalf("expected terminal 429, got %v", errExecute)
+					wantStatus := http.StatusTooManyRequests
+					if scenario == "policy refusal" {
+						wantStatus = http.StatusBadRequest
+					}
+					if !errors.As(errExecute, &status) || status.StatusCode() != wantStatus {
+						t.Fatalf("expected terminal %d, got %v", wantStatus, errExecute)
 					}
 					// Repeated client requests during cooldown must not send more upstream traffic.
-					if scenario != "overage billing" {
+					if scenario != "overage billing" && scenario != "policy refusal" {
 						if errAgain := invoke(); errAgain == nil {
 							t.Fatal("expected cooldown rejection")
 						}
@@ -298,7 +315,7 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 				first, second := attempts["first"], attempts["second"]
 				mu.Unlock()
 				wantSecond := 1
-				if scenario == "generic 429" || scenario == "per-minute rate" || scenario == "overage billing" {
+				if scenario == "generic 429" || scenario == "per-minute rate" || scenario == "overage billing" || scenario == "policy refusal" {
 					wantSecond = 0
 				}
 				if first != 1 || second != wantSecond {

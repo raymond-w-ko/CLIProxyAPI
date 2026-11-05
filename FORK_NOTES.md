@@ -1442,6 +1442,67 @@ package passes normal and race suites, the server builds, and the expanded
 restart test passes five race-enabled runs, including a new session's fresh date.
 Only the isolated fork GHCR publisher remains enabled.
 
+## Upstream refusal handling, WebSocket recovery, and image update
+
+The merge through `585f97de` (v8.0.56) includes 16 upstream commits, including
+three merge commits, after v8.0.55. Three selection conflicts were resolved to
+keep the fork's durable owner checks and upstream's request-aware credential
+selection. Existing ownership files, credentials, and `kv.db` need no migration.
+
+- Claude policy refusals, including sparse refusal details, now become HTTP 400
+  request faults. The Fast wrapper preserves that status even when upstream
+  returned HTTP 200. Streaming still consumes the terminal message before
+  reporting the refusal. These errors do not permit account migration.
+- Request logs retain classified stream errors and WebSocket errors even when
+  the outer HTTP status is successful. Error files use the error prefix.
+  Successful HTTP 200 bodies no longer consume a deferred error-log buffer.
+  Home stream logs also retain error entries.
+- Responses WebSocket clients receive terminal quota and rate-limit errors.
+  The new alternate-target probe checks request headers and credential tracks.
+  This fork also limits that probe to the saved durable owner until confirmed
+  quota exhaustion. Missing session identity or unavailable ownership storage
+  produces no alternate target. The probe does not write ownership records.
+- Codex image requests bypass Sign in with ChatGPT (SIWC), the nested credential
+  track, and use the outer Codex token and direct image endpoint. The model
+  catalog adds gpt-image-2.6. User payload rules still apply once, after built-in
+  request changes, for JSON and multipart generation/edit paths.
+- The Chat Completions bridge supports client tool_search and keeps returned
+  tools declared on later requests. OpenAI content-part arrays translate into
+  Claude thinking blocks. Gemini filter detection requires stream evidence;
+  quoted policy text remains normal content. Antigravity keeps earlier usage
+  evidence. Direct plugin executors record time to first token.
+
+The fork adds tests for quota-only alternate-target checks, unchanged ownership
+file bytes during probes, and owner reload after Claude refusals. Image tests
+cover SIWC bypass with final payload overrides and filters in normal and stream
+paths. A WebSocket test now joins its hijacked handler before removing temporary
+log files. This fixes a teardown race exposed by the new error logging.
+
+The v8.0.55 fail-fast database startup fix remains intact. Persistent session
+dates and quota-only ownership keep their previous behavior. Home main remains
+at `a8d691bc`; the new probe uses the existing protocol. No companion update is
+needed. Durable mode still rejects Home and scheduler plugins. No workflow,
+dependency, database format, or active-response deadline changed.
+
+Validation: the server build and nine image-retention tests pass. The full
+normal and race suites pass all packages except the known local multicast
+discovery integration test. No data races were reported. The normal suite also
+exposed the WebSocket test cleanup race described above. After that fix, the API
+package passes normal and race suites, and the test passes 30 race-enabled
+repetitions. Durable alternate-target checks, Claude refusal/quota migration,
+combined store restart behavior, and image payload rules pass five race-enabled
+repetitions.
+
+Independent Claude Opus 5.5 review found no blocking or actionable defects. It
+confirmed that conflict resolution, retry selection, and the alternate-target
+probe keep the durable owner checks. Its build, formatting checks, race-enabled
+auth affinity tests, and focused Claude, image, and WebSocket tests pass. It
+noted an informational coverage gap: the new durable probe test calls the
+manager directly rather than driving the full WebSocket handler. The main
+client-visible risk is the upstream change from refusal responses to HTTP 400.
+For standalone Claude OAuth, upgrading is recommended with subjective p=0.88.
+Publication retains the latest image and two rollback builds.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

@@ -78,6 +78,8 @@ func TestCodexImageResolvedModelOnWire(t *testing.T) {
 		{"legacy builtin case", "CODEX/GPT-Image-2(high)", "CODEX/GPT-Image-2(high)", "", "gpt-image-2", ""},
 		{"final payload override", "gpt-image-2", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "policy/image-model", "override"},
 		{"final payload filter", "gpt-image-2", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "", "filter"},
+		{"SIWC final payload override", "gpt-image-2.6", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "policy/image-model", "override"},
+		{"SIWC final payload filter", "gpt-image-2.6", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "", "filter"},
 	} {
 		for _, format := range []string{"generation JSON", "edit JSON", "edit multipart"} {
 			for _, stream := range []bool{false, true} {
@@ -85,6 +87,9 @@ func TestCodexImageResolvedModelOnWire(t *testing.T) {
 					var gotBody []byte
 					var gotPath, gotContentType string
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if strings.HasPrefix(tc.name, "SIWC ") && r.Header.Get("Authorization") != "Bearer codex-token" {
+							t.Errorf("image request did not use outer credential: %q", r.Header.Get("Authorization"))
+						}
 						gotPath, gotContentType = r.URL.Path, r.Header.Get("Content-Type")
 						var errRead error
 						gotBody, errRead = io.ReadAll(r.Body)
@@ -159,6 +164,16 @@ func TestCodexImageResolvedModelOnWire(t *testing.T) {
 					req := cliproxyexecutor.Request{Model: tc.resolved, Payload: payload}
 					executor := NewCodexExecutor(cfg)
 					auth := newCodexOpenAIImageTestAuth(server.URL)
+					if strings.HasPrefix(tc.name, "SIWC ") {
+						auth.Metadata = map[string]any{
+							"use_siwc": true,
+							"siwc":     map[string]any{"access_token": "siwc-token"},
+						}
+						if opts.Headers == nil {
+							opts.Headers = make(http.Header)
+						}
+						opts.Headers.Set("User-Agent", "curl/8.0")
+					}
 					if stream {
 						result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
 						if errStream != nil {
@@ -484,16 +499,24 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart(t 
 	}
 }
 
-func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
+func TestCodexExecutorDirectOpenAIImage25And26Models(t *testing.T) {
 	testModels := []string{
 		"gpt-image-2.5",
 		"gpt-image-2.5-flare",
 		"gpt-image-2.5-sunburst",
+		"gpt-image-2.6",
+		"gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
 		"codex/gpt-image-2.5",
 		"codex/gpt-image-2.5-flare",
 		"codex/gpt-image-2.5-sunburst",
+		"codex/gpt-image-2.6",
+		"codex/gpt-image-2.6-flare",
+		"codex/gpt-image-2.6-sunburst",
 		"GPT-Image-2.5(medium)",
 		"codex/GPT-Image-2.5-Flare(high)",
+		"GPT-Image-2.6(medium)",
+		"codex/GPT-Image-2.6-Flare(high)",
 	}
 
 	for _, model := range testModels {

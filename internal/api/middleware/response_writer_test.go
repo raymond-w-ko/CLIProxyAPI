@@ -218,6 +218,7 @@ func (l *testRequestLogger) IsEnabled() bool {
 
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
+	apiResponseErrors    []*interfaces.ErrorMessage
 	closed               bool
 }
 
@@ -237,6 +238,11 @@ func (w *testStreamingLogWriter) WriteAPIResponse([]byte) error {
 
 func (w *testStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error {
 	w.apiWebsocketTimeline = bytes.Clone(apiWebsocketTimeline)
+	return nil
+}
+
+func (w *testStreamingLogWriter) WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error {
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), errors...)
 	return nil
 }
 

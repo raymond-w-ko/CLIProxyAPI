@@ -47,6 +47,55 @@ func durableTestPick(m *Manager, model string, opts cliproxyexecutor.Options) (*
 	return a, errPick
 }
 
+func TestDurableAffinityAlternativeTargetRequiresQuota(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, tc := range []struct {
+		name        string
+		status      int
+		quota       bool
+		alternative bool
+	}{
+		{"healthy owner", 0, false, false},
+		{"generic rate limit", 429, false, false},
+		{"transient failure", 503, false, false},
+		{"rejected credential", 401, false, false},
+		{"confirmed quota", 429, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			opts := durableTestOptions()
+			if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+				t.Fatal(errPick)
+			}
+			if tc.status != 0 {
+				cooldown := time.Hour
+				m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one", Options: opts,
+					Error: &Error{HTTPStatus: tc.status, Message: tc.name}, CredentialScope: tc.quota, RetryAfter: &cooldown})
+			}
+			before, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if got := m.HasAlternativeTargetForModel(context.Background(), []string{"claude"}, "model-one", opts, ids[0]); got != tc.alternative {
+				t.Fatalf("alternative target = %v, want %v", got, tc.alternative)
+			}
+			after, errRead := os.ReadFile(path)
+			if errRead != nil || string(before) != string(after) {
+				t.Fatalf("read-only replay probe changed durable bindings: %v", errRead)
+			}
+			// A rejected probe must not create an alias or remove an owner.
+			reloaded, _ := durableTestManager(t, path)
+			if owner, errPick := durableTestPick(reloaded, "model-two", opts); errPick != nil || owner.ID != ids[0] {
+				t.Fatalf("reloaded owner = %v, %v", owner, errPick)
+			}
+			if m.HasAlternativeTargetForModel(context.Background(), []string{"claude"}, "model-one", cliproxyexecutor.Options{}, ids[0]) {
+				t.Fatal("replay probe accepted a request without a durable session ID")
+			}
+		})
+	}
+}
+
 func TestDurableAffinityRestartModelsAndReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bindings.json")
 	m, ids := durableTestManager(t, path)
