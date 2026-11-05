@@ -1385,6 +1385,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.UpdatedAt = now
 
 		if !result.SkipQuotaObservation {
+			if soonestResetSelector(m.selector) != nil {
+				m.claudeQuota.observe(auth, responseHeaders, now)
+			}
 			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			if modelState != nil {
 				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)

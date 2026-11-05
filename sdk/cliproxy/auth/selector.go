@@ -1193,6 +1193,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 	fallbackAuths := highestPriorityAuths(available)
+	if soonestResetSelector(s.fallback) != nil {
+		fallbackAuths = available
+	}
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey

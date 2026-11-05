@@ -41,6 +41,40 @@ migration but no replacement is eligible, the old binding remains. Keep credenti
 IDs stable. Account affinity reduces unnecessary Claude thinking loss; it cannot
 transfer thinking blocks between unrelated accounts.
 
+## Soonest weekly reset first
+
+Set `routing.strategy: soonest-reset-first` to use Claude OAuth quota nearest its
+weekly reset first. Manual priority still applies. Existing durable owners stay
+fixed. Only new bindings and migrations already allowed by confirmed quota
+exhaustion use the ranking. Other providers and mixed-provider candidate sets use
+round-robin.
+
+Normal inference headers refresh each observed window without extra requests.
+A single background worker fills stale windows. It spaces requests by one second
+and reads each account at most once per 60 seconds. Recent headers suppress these
+reads, even when older model-specific windows exist. A valid full usage response
+with a null or missing five-hour window means no five-hour constraint. Missing headers alone do not establish this.
+
+Fresh exhausted five-hour, weekly, and applicable model windows exclude accounts
+from new selection. Unknown data uses round-robin after accounts with known resets.
+Observations older than five minutes or past their reset do not affect selection.
+A probe failure retains the last successful data. It cannot authorize migration.
+
+Polling honors `Retry-After` and backs off network or server failures to 30 minutes.
+Three quota auth failures pause polling for that credential grant. An unchanged
+terminally rejected refresh grant pauses it immediately. Credential replacement
+clears the pause. Only an expired access token uses coordinated token refresh after
+a quota 401; a quota rejection of a valid token does not invalidate inference.
+Snapshots and retry gates persist in local `kv.db` when KV storage is enabled.
+They use hashed credential keys and expire after eight days. Successful token
+refresh keeps observations. Manual credential replacement starts a new cache
+record. Quota reads use the credential's proxy and a fixed Anthropic endpoint. This strategy does not query API keys or Home credentials.
+When all eligible accounts are observed as exhausted, new selection returns 503,
+including accounts with paid extra usage. Existing owners still run as usual.
+One stalled quota response can delay the single worker until shutdown; normal
+response headers still update quota. More than 60 accounts can take over a minute
+to poll. Unused windows with null reset times have no reset available for ranking.
+
 ## Configuration
 
 Merge these settings into the existing config. Do not duplicate YAML sections.

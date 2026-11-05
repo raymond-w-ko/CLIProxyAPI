@@ -167,7 +167,12 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, soonest-reset-first
+  # soonest-reset-first prefers Claude OAuth accounts with the earliest known weekly reset.
+  # Keeps manual priorities and saved session owners. Other providers use round-robin.
+  # Uses response headers and at most one dedicated usage read per account per 60s.
+  # Repeated quota auth failures pause polling until credentials change.
+  # Quota cache and retry gates persist in local kv.db when KV storage is enabled.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.

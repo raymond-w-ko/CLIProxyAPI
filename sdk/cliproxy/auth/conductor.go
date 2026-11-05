@@ -237,6 +237,11 @@ type Manager struct {
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
 	refreshJobs map[string]*authRefreshJob
 
+	claudeQuota   *claudeQuotaCache
+	quotaWorkerMu sync.Mutex
+	quotaCancel   context.CancelFunc
+	quotaDone     chan struct{}
+
 	requestPrepareLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
@@ -261,6 +266,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
+		claudeQuota:           newClaudeQuotaCache(),
 		store:                 store,
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
@@ -280,6 +286,9 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig())
 	if errInFlightConfig == nil {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
+	}
+	if ranked := soonestResetSelector(selector); ranked != nil {
+		ranked.cache.Store(manager.claudeQuota)
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager

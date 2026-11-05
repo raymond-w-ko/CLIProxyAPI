@@ -188,7 +188,11 @@ func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, base, updated, updateModeRefresh)
+	saved, errUpdate := m.updateInternal(ctx, base, updated, updateModeRefresh)
+	if errUpdate == nil && saved != nil {
+		m.carryClaudeQuotaRefresh(base, saved)
+	}
+	return saved, errUpdate
 }
 
 // Update replaces an existing auth entry and notifies hooks.
