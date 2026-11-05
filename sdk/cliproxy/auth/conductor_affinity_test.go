@@ -47,6 +47,63 @@ func durableTestPick(m *Manager, model string, opts cliproxyexecutor.Options) (*
 	return a, errPick
 }
 
+func TestDurableAffinityUnsupportedCountKeepsOwnerAvailable(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"HTTP 501", &Error{HTTPStatus: http.StatusNotImplemented, Message: "count_tokens not implemented"}},
+		{"capability code", &Error{Code: "count_tokens_unsupported", Message: "count_tokens not supported"}},
+		{"wrapped unsupported", fmt.Errorf("count_tokens: %w", errors.ErrUnsupported)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			m.SetRetryConfig(0, 0, 0)
+			opts := durableTestOptions()
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+			if owner, errPick := durableTestPick(m, "model-one", opts); errPick != nil || owner.ID != ids[1] {
+				t.Fatalf("initial owner = %v, %v", owner, errPick)
+			}
+			opts = durableTestOptions()
+			before, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			var attempts []string
+			m.RegisterExecutor(&authFallbackExecutor{
+				id: "claude", countTokenErrors: map[string]error{ids[1]: tc.err},
+				onCountTokens: func(selected *Auth) { attempts = append(attempts, selected.ID) },
+			})
+			for range 2 {
+				if _, errCount := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "model-one"}, opts); errCount == nil {
+					t.Fatal("expected unsupported count error")
+				}
+			}
+			if len(attempts) != 2 || attempts[0] != ids[1] || attempts[1] != ids[1] {
+				t.Fatalf("count attempts = %v, want the saved owner twice", attempts)
+			}
+			updated, _ := m.GetByID(ids[1])
+			if updated.Unavailable || updated.ModelStates["model-one"] != nil || updated.Failed != 2 {
+				t.Fatalf("unsupported count changed owner availability or lost failure metrics: %+v", updated)
+			}
+			resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "model-one"}, opts)
+			if errExecute != nil || string(resp.Payload) != ids[1] {
+				t.Fatalf("inference after unsupported count = %q, %v", resp.Payload, errExecute)
+			}
+			after, errRead := os.ReadFile(path)
+			if errRead != nil || string(before) != string(after) {
+				t.Fatalf("unsupported count changed saved bindings: %v", errRead)
+			}
+			restarted, _ := durableTestManager(t, path)
+			if owner, errPick := durableTestPick(restarted, "model-two", opts); errPick != nil || owner.ID != ids[1] {
+				t.Fatalf("restarted owner after unsupported count = %v, %v", owner, errPick)
+			}
+		})
+	}
+}
+
 func TestDurableAffinityAlternativeTargetRequiresQuota(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for _, tc := range []struct {

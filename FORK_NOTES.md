@@ -1503,6 +1503,68 @@ client-visible risk is the upstream change from refusal responses to HTTP 400.
 For standalone Claude OAuth, upgrading is recommended with subjective p=0.88.
 Publication retains the latest image and two rollback builds.
 
+## Upstream token-count availability and hosted image compatibility update
+
+The conflict-free merge through `c2f402b4` (v8.0.57) includes five upstream
+commits after v8.0.56. Durable session ownership and quota-only migration keep
+their previous behavior. Existing credentials, `session-bindings.json`, and
+`kv.db` need no migration. The fail-fast database startup fix remains intact.
+
+- Token counting now treats HTTP 501 and recognized unsupported-capability
+  errors like an unavailable endpoint. Failed counts still appear in metrics
+  and hooks, but do not suspend the account or model and do not extend an
+  existing inference cooldown. Explicit model-not-found, credential failures,
+  and rate limits retain their normal handling. Plugin errors expose their
+  machine-readable codes to the same classification code. Plugin codes now also
+  reach normal request handling and can drive cooldown or quota migration;
+  plugins must reserve quota codes for confirmed exhaustion. Built-in Claude
+  OAuth classification is unchanged.
+- The usage dispatcher clears each consumed queue slot. This releases references
+  to request contexts, response headers, and usage details while the queue is
+  idle. The fork's captured request-identity protection remains intact.
+- Codex no longer injects an optional hosted image tool for GPT-6 or models
+  marked as Responses-Lite in the client catalog. For an OAuth request that
+  explicitly requires the hosted image tool, the proxy selects a compatible
+  base model, defaulting to `gpt-5.4-mini`, and normalizes reasoning settings.
+  Incompatible configured image base models also fall back to that default.
+  The hosted tool's unsupported complexity parameter is removed before final
+  user payload rules. These changes cover HTTP and WebSocket, normal and stream
+  requests. API-key, nested SIWC, and passthrough paths retain their behavior.
+  Optional image turns keep the requested chat model. Image user errors become
+  HTTP 400 and include guidance when complexity caused the error.
+- Meta sends the contributor header only for contributor models. It reads the
+  effective model after user payload rules. The Devin catalog adds swe-2-flash,
+  nemotron-3-5-super, and gpt-6-1-terra.
+
+The fork adds a durable-owner regression for HTTP 501, a capability code with
+no HTTP status, and a wrapped unsupported error. Each case counts twice on the
+saved second account, keeps inference available, leaves the bindings file
+unchanged, and retains that account after restart and a model change. Extended
+hosted-image tests check matching and nonmatching payload-rule headers across
+HTTP and WebSocket, normal and stream paths. A positional input filter verifies
+that rules run once and removed tools stay removed after model fallback.
+
+Home main remains at `a8d691bc`; the shared error-code additions require no
+companion protocol change. No workflow, dependency, storage format, or active
+response deadline changed. Only the fork GHCR publisher remains enabled.
+Validation: the server build and nine image-retention tests pass. Full normal
+and race suites pass all packages except the known local multicast discovery
+integration test. No data races were reported. The unsupported-count owner test
+passes five race-enabled repetitions. The expanded hosted-image payload filter
+tests pass three race-enabled repetitions. The final durable-affinity, Claude
+quota/refusal and database restart checks, and Codex image payload tests also
+pass five race-enabled repetitions.
+
+Independent Claude Opus 5.5 review found no blocking issues. Its focused count
+and alternate-target tests pass. It confirmed restart compatibility, unchanged
+Claude quota classification, and final payload ordering. The plugin-code caveat
+above records its low-severity finding. It also noted an existing Codex limit:
+a payload rule that rewrites the model can leave routing headers based on the
+model selected before the rule. This does not affect Claude OAuth. For standalone
+Claude OAuth, upgrading is recommended with subjective p=0.85. The direct memory
+benefit is modest; this release has no urgent native Claude fix. Publication
+retains the latest image and two rollback builds.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream
