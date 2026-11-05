@@ -1370,6 +1370,78 @@ adjustment. An independent Claude Opus 5.5 review found no actionable regression
 and reran the key quota, durable-affinity, targeted OAuth, and web-search tests
 successfully. Publication retains the latest image and two rollback builds.
 
+## Upstream persistent caches and Claude session date update
+
+The conflict-free merge through `e6e5708e` (v8.0.55) includes 15 upstream
+commits, including two merge commits, after v8.0.53. Durable account ownership
+and quota-only migration remain unchanged. Existing `session-bindings.json`
+files need no migration.
+
+- Standalone service startup now enables a local bbolt database by default.
+  This database stores key-value records in `<auth-dir>/kv.db`. Existing cache
+  calls use Home first, then local bbolt, then memory when both are disabled.
+  This also persists thinking/signature replay, search results, device profiles,
+  and other existing KV-backed records. Their existing expiration periods still
+  apply; persistence does not make expired thinking signatures valid.
+- Cloaked Claude session dates now persist permanently in the active KV store.
+  In this mode, `upstream.claude.session-date-pin-days` no longer controls
+  retention, including when set to zero. Each session keeps its original date
+  across restarts and permitted account migration. Date pins use session hashes;
+  the separate ownership file still scopes accounts by provider, caller, and
+  session. Resuming an old session retains its old date. Native passthrough
+  requests do not gain a new injected date reminder.
+- Codex remote compaction now works through OpenAI-compatible routes, including
+  summary generation, capsule replay, and streamed compaction responses. The
+  summary uses the selected credential and normal final payload rules.
+- Claude usage reporting and Devin model selection honor the last conversation
+  effort directive. Cached image/audio usage and Interactions modality counts
+  are reported. Codex input item IDs have invalid characters removed.
+- Antigravity model discovery moves into the auth SDK and preserves unknown
+  versus explicitly empty catalogs. Its fallback client version is 2.29.0.
+  Plugin reload aborts when quiescence fails and coordinates pending usage
+  delivery with replacement or recovery. The moego dependency moves to v0.1.2.
+
+The recommended Compose layout already mounts the auth directory, so it also
+preserves `kv.db`. Keep it with credentials, cooldown files, and the config
+directory containing `session-bindings.json`. Stop the proxy before copying the
+database for backup. The database is created with mode 0600 and can contain
+conversation content. Run only one proxy process against each database file.
+An explicit `server.kv-store.path` must also point into persistent storage.
+
+Set `server.kv-store.disabled: true` to retain the previous memory-only cache
+behavior. This does not disable durable account ownership. If opening the
+database fails, this fork returns a startup error before creating the API server.
+This fixes an operational issue found by the independent Claude Opus 5.5 review:
+upstream starts despite the failure, then required Claude cache operations fail
+on requests. Hot reload still logs errors and can recover when given a valid
+path. Required cache operations do not silently use memory. Date pins alone use
+a best-effort memory fallback on KV errors after startup, which cannot promise
+continuity across a later restart. Keep the database path writable. Permanent
+date records accumulate, and bbolt does not shrink its file automatically.
+
+The fork adds a regression that closes and reopens both stores, advances a
+controlled clock by 45 days, changes models and credential priorities, then
+checks quota migration and a second restart. The original date remains stable.
+The saved owner stays A until confirmed quota exhaustion and stays B after
+migration, even when A recovers. The buffer-safety check now records that bbolt's
+binary envelope copies into a fresh allocation before any reader can access it.
+
+Home `main` remains at `a8d691bc`. The KV interfaces use the existing protocol;
+no companion Home update is needed. Durable mode still rejects Home and
+scheduler plugins. No workflows or active-response deadlines changed.
+
+Validation: the server build and nine image-retention tests pass. The full
+normal and race suites pass all packages except the known local multicast
+discovery integration test. No data races were reported. Durable ownership,
+quota migration, saved-file compatibility, and the combined database restart
+regression pass five race-enabled repetitions. Opus found no blocking ownership
+or payload-ordering regressions and reran the focused KV, date, quota, and
+compaction tests with the race detector. The fork also tests startup rejection
+and reload recovery after a database open failure. After that fix, the SDK
+package passes normal and race suites, the server builds, and the expanded
+restart test passes five race-enabled runs, including a new session's fresh date.
+Only the isolated fork GHCR publisher remains enabled.
+
 ## Recommended Docker Compose deployment
 
 Use an image built from this fork's patched source. Upstream

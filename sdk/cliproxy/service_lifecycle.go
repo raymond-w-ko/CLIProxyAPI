@@ -80,6 +80,9 @@ func (s *Service) Run(ctx context.Context) error {
 			return errEnsureAuthDir
 		}
 	}
+	if errKVStore := s.applyKVStoreConfig(cfg); errKVStore != nil {
+		return fmt.Errorf("cliproxy: initialize local kv store: %w", errKVStore)
+	}
 
 	s.applyRetryConfig(cfg)
 	s.configureCooldownStateStore(cfg)
@@ -387,6 +390,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.pluginHost.ShutdownAllContext(ctx)
 			if s.accessManager != nil {
 				s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+			}
+		}
+
+		if errShutdownKV := s.shutdownKVStore(); errShutdownKV != nil {
+			log.Errorf("failed to stop local kv store: %v", errShutdownKV)
+			if shutdownErr == nil {
+				shutdownErr = errShutdownKV
 			}
 		}
 

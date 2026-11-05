@@ -15,7 +15,10 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -29,6 +32,137 @@ func (e durableClaudeTestExecutor) ForAPIKey() cliproxyauth.ProviderExecutor { r
 // origins normally use local estimation instead.
 func (e durableClaudeTestExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return e.countTokensUpstream(ctx, auth, req, opts)
+}
+
+func TestClaudeDurableAffinityAndDateSurviveRestart(t *testing.T) {
+	homekv.ClearCurrent()
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatal(errShutdown)
+	}
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(func() {
+		claudeCodeCurrentTimeFunc = nil
+		homekv.ClearCurrent()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Error(errShutdown)
+		}
+		helps.ResetClaudeDiagnosticsForTest()
+	})
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "kv.db")
+	bindingPath := filepath.Join(dir, "session-bindings.json")
+	clock := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	claudeCodeCurrentTimeFunc = func(*config.Config, *cliproxyauth.Auth) time.Time { return clock }
+	zero := 0
+	cfg := &config.Config{Claude: config.ClaudeConfig{SessionDatePinDays: &zero}}
+	var activeSelector *cliproxyauth.SessionAffinitySelector
+	ids := []string{t.Name() + "-a", t.Name() + "-b"}
+	for _, id := range ids {
+		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: "claude-opus-5"}, {ID: "claude-sonnet-4-6"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	start := func(preferred int) *cliproxyauth.Manager {
+		t.Helper()
+		if errOpen := kvstore.ConfigureLocal(true, dbPath); errOpen != nil {
+			t.Fatal(errOpen)
+		}
+		selector := cliproxyauth.NewSessionAffinitySelectorWithConfig(cliproxyauth.SessionAffinityConfig{
+			File: bindingPath, Fallback: &cliproxyauth.FillFirstSelector{},
+		})
+		activeSelector = selector
+		t.Cleanup(selector.Stop)
+		manager := cliproxyauth.NewManager(nil, selector, nil)
+		manager.SetRetryConfig(3, 0, 0)
+		manager.RegisterExecutor(NewClaudeExecutor(cfg))
+		for i, id := range ids {
+			priority := "0"
+			if i == preferred {
+				priority = "10"
+			}
+			_, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), &cliproxyauth.Auth{
+				ID: id, Provider: "claude",
+				Attributes: map[string]string{
+					"api_key": "sk-ant-oat-restart-" + strconv.Itoa(i), "priority": priority,
+					"cloak_mode": "always", "timezone": "UTC",
+				},
+				Metadata: map[string]any{"account_uuid": "11111111-2222-4333-8444-55555555555" + strconv.Itoa(i)},
+			})
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+		}
+		return manager
+	}
+	restart := func(preferred int) *cliproxyauth.Manager {
+		t.Helper()
+		activeSelector.Stop()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Fatal(errShutdown)
+		}
+		helps.ResetClaudeDiagnosticsForTest()
+		return start(preferred)
+	}
+	var bodies [][]byte
+	var keys []string
+	quota := false
+	transport := datePinRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		bodies = append(bodies, body)
+		key := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		keys = append(keys, key)
+		header := http.Header{"Content-Type": {"application/json"}}
+		status := http.StatusOK
+		payload := `{"id":"msg_restart","type":"message","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+		if quota && key == "sk-ant-oat-restart-0" {
+			status = http.StatusTooManyRequests
+			header.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+			header.Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			payload = `{"type":"error","error":{"type":"rate_limit_error","message":"Quota exhausted"}}`
+		}
+		return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(payload)), Request: req}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"durable-date-restart"}}}
+	req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":16}`)}
+	invoke := func(manager *cliproxyauth.Manager) {
+		t.Helper()
+		if _, errExecute := manager.Execute(ctx, []string{"claude"}, req, opts); errExecute != nil {
+			t.Fatal(errExecute)
+		}
+	}
+	invoke(start(0))
+	clock = clock.AddDate(0, 0, 45)
+	// A fresh selector would prefer B. The saved owner must retain A across
+	// restart and a model change, while the saved date must retain day one.
+	manager := restart(1)
+	req.Model = "claude-sonnet-4-6"
+	req.Payload = []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Say OK."}],"max_tokens":16}`)
+	invoke(manager)
+	quota = true
+	invoke(manager)
+	quota = false
+	// Both credentials are healthy after this restart, and A has higher
+	// priority. Only the saved replacement binding can retain B.
+	manager = restart(0)
+	invoke(manager)
+	wantKeys := []string{"sk-ant-oat-restart-0", "sk-ant-oat-restart-0", "sk-ant-oat-restart-0", "sk-ant-oat-restart-1", "sk-ant-oat-restart-1"}
+	if strings.Join(keys, ",") != strings.Join(wantKeys, ",") {
+		t.Fatalf("upstream owners = %v, want %v", keys, wantKeys)
+	}
+	for i, body := range bodies {
+		if got := extractClaudeCloakDate(t, body); got != "2026-08-01" {
+			t.Fatalf("request %d date = %q, want 2026-08-01", i, got)
+		}
+	}
+	// A new session must get today's date, not another session's saved pin.
+	opts.Headers.Set("X-Session-Id", "new-session-after-restart")
+	invoke(manager)
+	if got := extractClaudeCloakDate(t, bodies[len(bodies)-1]); got != clock.Format("2006-01-02") {
+		t.Fatalf("new session date = %q, want %s", got, clock.Format("2006-01-02"))
+	}
 }
 
 func TestClaudeDurableAffinityModelQuota(t *testing.T) {
