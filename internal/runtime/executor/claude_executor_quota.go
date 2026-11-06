@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -18,7 +17,7 @@ import (
 func (e *ClaudeExecutor) FetchClaudeQuota(ctx context.Context, auth *cliproxyauth.Auth) (cliproxyauth.ClaudeQuotaSnapshot, error) {
 	token, baseURL := claudeCreds(auth)
 	if !isClaudeOAuthToken(token) || (baseURL != "" && baseURL != "https://api.anthropic.com") {
-		return nil, &cliproxyauth.ClaudeQuotaProbeError{Status: http.StatusForbidden}
+		return nil, &cliproxyauth.ClaudeQuotaProbeError{Status: http.StatusForbidden, Reason: "unsupported_credential"}
 	}
 	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
 	if errRequest != nil {
@@ -31,7 +30,7 @@ func (e *ClaudeExecutor) FetchClaudeQuota(ctx context.Context, auth *cliproxyaut
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, errResponse := client.Do(req)
 	if errResponse != nil {
-		return nil, fmt.Errorf("Claude quota transport failed")
+		return nil, &cliproxyauth.ClaudeQuotaProbeError{Reason: "transport_error"}
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -49,8 +48,11 @@ func (e *ClaudeExecutor) FetchClaudeQuota(ctx context.Context, auth *cliproxyaut
 	}
 	const maxUsageBody = 1024 * 1024
 	raw, errRead := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
-	if errRead != nil || len(raw) > maxUsageBody {
-		return nil, fmt.Errorf("could not read Claude quota response")
+	if errRead != nil {
+		return nil, &cliproxyauth.ClaudeQuotaProbeError{Status: http.StatusOK, Reason: "read_error"}
+	}
+	if len(raw) > maxUsageBody {
+		return nil, &cliproxyauth.ClaudeQuotaProbeError{Status: http.StatusOK, Reason: "response_too_large"}
 	}
 	return cliproxyauth.ParseClaudeQuotaUsage(raw, time.Now())
 }

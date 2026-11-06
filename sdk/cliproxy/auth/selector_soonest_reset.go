@@ -112,7 +112,7 @@ func claudeQuotaRank(windows ClaudeQuotaSnapshot, model string, now time.Time) (
 		}
 	}
 	weekly := windows["7d"]
-	return weekly.Reset, claudeQuotaWindowFresh(weekly, now, claudeQuotaRankAge) && !weekly.Unlimited && weekly.Reset.After(now), false
+	return weekly.Reset, claudeQuotaWindowFresh(weekly, now, claudeQuotaResetRankAge) && !weekly.Unlimited && weekly.Reset.After(now), false
 }
 
 // Keep model-scoped limits tied to each credential's resolved upstream model.

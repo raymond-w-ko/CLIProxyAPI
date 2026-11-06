@@ -170,7 +170,9 @@ routing:
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, soonest-reset-first
   # soonest-reset-first prefers Claude OAuth accounts with the earliest known weekly reset.
   # Keeps manual priorities and saved session owners. Other providers use round-robin.
-  # Uses response headers and at most one dedicated usage read per account per 60s.
+  # Uses response headers; background reads are at most once per account per 15m.
+  # Reads across accounts are spaced by 30s; a quota 429 pauses all polling for at least 30m.
+  # Confirmed absence of a five-hour window is cached for 24h.
   # Repeated quota auth failures pause polling until credentials change.
   # Quota cache and retry gates persist in local kv.db when KV storage is enabled.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).

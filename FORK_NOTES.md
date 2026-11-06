@@ -50,30 +50,38 @@ exhaustion use the ranking. Other providers and mixed-provider candidate sets us
 round-robin.
 
 Normal inference headers refresh each observed window without extra requests.
-A single background worker fills stale windows. It spaces requests by one second
-and reads each account at most once per 60 seconds. Recent headers suppress these
-reads, even when older model-specific windows exist. A valid full usage response
-with a null or missing five-hour window means no five-hour constraint. Missing headers alone do not establish this.
+A single background worker reads each account at most once per 15 minutes and
+spaces reads across accounts by 30 seconds. Recent shared-window headers suppress
+reads. A valid full response with a null or missing five-hour window confirms
+that absence for 24 hours. Missing headers alone cannot establish it. New explicit
+five-hour headers replace this cached capability immediately.
 
-Fresh exhausted five-hour, weekly, and applicable model windows exclude accounts
-from new selection. Unknown data uses round-robin after accounts with known resets.
-Observations older than five minutes or past their reset do not affect selection.
-A probe failure retains the last successful data. It cannot authorize migration.
+Known future weekly resets remain useful for ranking for up to 24 hours. Only
+usage observations less than five minutes old can exclude accounts from new
+selection for exhaustion. Expired resets are ignored. Unknown reset data uses
+round-robin after accounts with known resets. A probe failure retains previous
+data and cannot authorize migration.
 
-Polling honors `Retry-After` and backs off network or server failures to 30 minutes.
-Three quota auth failures pause polling for that credential grant. An unchanged
-terminally rejected refresh grant pauses it immediately. Credential replacement
-clears the pause. Only an expired access token uses coordinated token refresh after
-a quota 401; a quota rejection of a valid token does not invalidate inference.
+A quota-endpoint 429 pauses the entire background polling pool for at least
+30 minutes, or longer when `Retry-After` requires it. This shared cooldown survives
+restarts and credential changes. Other failures back off from 15 minutes to two
+hours. A successful read cannot restore one-minute polling. Three quota auth
+failures pause that grant; an unchanged terminal refresh rejection pauses it
+immediately. Only an expired-token quota 401 invokes coordinated token refresh.
+A quota rejection of a valid token does not invalidate inference. Warnings include
+the safe failure category, HTTP status when available, failure counts, and retry
+time. They never include raw response bodies or transport errors.
+
 Snapshots and retry gates persist in local `kv.db` when KV storage is enabled.
 They use hashed credential keys and expire after eight days. Successful token
-refresh keeps observations. Manual credential replacement starts a new cache
-record. Quota reads use the credential's proxy and a fixed Anthropic endpoint. This strategy does not query API keys or Home credentials.
+refresh keeps observations. Manual credential replacement starts a new account
+cache record but preserves the shared pool cooldown. Quota reads use the
+credential's proxy and a fixed Anthropic endpoint. API keys and Home are excluded.
 When all eligible accounts are observed as exhausted, new selection returns 503,
 including accounts with paid extra usage. Existing owners still run as usual.
 One stalled quota response can delay the single worker until shutdown; normal
-response headers still update quota. More than 60 accounts can take over a minute
-to poll. Unused windows with null reset times have no reset available for ranking.
+response headers still update quota. Large account pools take longer to refresh.
+Unused windows with null reset times have no reset available for ranking.
 
 ## Configuration
 

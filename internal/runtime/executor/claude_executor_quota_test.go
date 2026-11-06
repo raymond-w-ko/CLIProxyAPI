@@ -55,3 +55,33 @@ func TestClaudeQuotaFetchCancellation(t *testing.T) {
 		t.Fatal("cancellation succeeded")
 	}
 }
+
+func TestClaudeQuotaFetchFailureCategories(t *testing.T) {
+	a := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "sk-ant-oat01-test"}}
+	for _, tc := range []struct {
+		name, body, reason string
+		transportError     bool
+	}{
+		{name: "transport", reason: "transport_error", transportError: true},
+		{name: "html", body: "<html>challenge</html>", reason: "invalid_json"},
+		{name: "missing usage", body: `{"error":"secret-response-body"}`, reason: "missing_weekly_window"},
+		{name: "invalid window", body: `{"seven_day":{"utilization":"secret-response-body","resets_at":null}}`, reason: "invalid_window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				if tc.transportError {
+					return nil, errors.New("secret-transport-error")
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			}))
+			_, errFetch := NewClaudeExecutor(&config.Config{}).FetchClaudeQuota(ctx, a)
+			var probe *cliproxyauth.ClaudeQuotaProbeError
+			if !errors.As(errFetch, &probe) || probe.Reason != tc.reason {
+				t.Fatalf("failure=%v", errFetch)
+			}
+			if strings.Contains(errFetch.Error(), "secret-") {
+				t.Fatal("failure leaked untrusted response or transport text")
+			}
+		})
+	}
+}

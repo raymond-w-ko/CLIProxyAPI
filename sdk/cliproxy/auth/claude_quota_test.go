@@ -98,7 +98,7 @@ func TestSoonestResetFirstSelection(t *testing.T) {
 	if got, errPick := s.Pick(ctx, "claude", "claude-fable", opts, []*Auth{a, b, unknown}); errPick != nil || got.ID != "unknown" {
 		t.Fatalf("unknown fallback = %v, %v", got, errPick)
 	}
-	for _, w := range []ClaudeQuotaWindow{{Used: 1, Observed: now.Add(-10 * time.Minute), Reset: now.Add(time.Hour)}, {Used: 1, Observed: now, Reset: now.Add(-time.Hour)}} {
+	for _, w := range []ClaudeQuotaWindow{{Used: 1, Observed: now.Add(-25 * time.Hour), Reset: now.Add(time.Hour)}, {Used: 1, Observed: now, Reset: now.Add(-time.Hour)}} {
 		if _, known, blocked := claudeQuotaRank(ClaudeQuotaSnapshot{"7d": w}, "claude-fable", now); known || blocked {
 			t.Fatal("stale data affected rank")
 		}
@@ -142,32 +142,30 @@ func TestClaudeQuotaPollingFreshnessAndBackoff(t *testing.T) {
 		return quotaTestWindows(now, 24*time.Hour), nil
 	})
 	m.refreshOneClaudeQuota(ctx, now)
-	m.refreshOneClaudeQuota(ctx, now.Add(59*time.Second))
+	m.refreshOneClaudeQuota(ctx, now.Add(15*time.Minute-time.Second))
 	if e.calls != 1 {
-		t.Fatalf("calls = %d", e.calls)
+		t.Fatalf("calls=%d", e.calls)
 	}
-	// Normal response headers refresh both independently, avoiding a dedicated read.
 	h := http.Header{}
 	for _, name := range []string{"5h", "7d"} {
 		h.Set("Anthropic-Ratelimit-Unified-"+name+"-Utilization", "0.5")
 		h.Set("Anthropic-Ratelimit-Unified-"+name+"-Reset", strconv.FormatInt(now.Add(24*time.Hour).Unix(), 10))
 	}
-	m.claudeQuota.observe(a, h, now.Add(59*time.Second))
-	m.refreshOneClaudeQuota(ctx, now.Add(61*time.Second))
+	m.claudeQuota.observe(a, h, now.Add(16*time.Minute))
+	m.refreshOneClaudeQuota(ctx, now.Add(16*time.Minute))
 	if e.calls != 1 {
 		t.Fatal("fresh headers did not suppress probe")
 	}
-	// Status-only headers cannot keep an old utilization fresh.
-	m.claudeQuota.observe(a, http.Header{"Anthropic-Ratelimit-Unified-7d-Status": {"allowed"}}, now.Add(120*time.Second))
-	m.refreshOneClaudeQuota(ctx, now.Add(120*time.Second))
+	m.claudeQuota.observe(a, http.Header{"Anthropic-Ratelimit-Unified-7d-Status": {"allowed"}}, now.Add(21*time.Minute))
+	m.refreshOneClaudeQuota(ctx, now.Add(21*time.Minute))
 	if e.calls != 2 {
 		t.Fatalf("stale data not refreshed: %d", e.calls)
 	}
 	e.fetch = func(context.Context, *Auth) (ClaudeQuotaSnapshot, error) {
-		return nil, &ClaudeQuotaProbeError{Status: 429, RetryAt: now.Add(10 * time.Minute)}
+		return nil, &ClaudeQuotaProbeError{Status: 429, RetryAt: now.Add(90 * time.Minute)}
 	}
-	m.refreshOneClaudeQuota(ctx, now.Add(3*time.Minute))
-	m.refreshOneClaudeQuota(ctx, now.Add(9*time.Minute))
+	m.refreshOneClaudeQuota(ctx, now.Add(36*time.Minute))
+	m.refreshOneClaudeQuota(ctx, now.Add(89*time.Minute))
 	if e.calls != 3 {
 		t.Fatalf("ignored Retry-After: %d", e.calls)
 	}
@@ -175,13 +173,14 @@ func TestClaudeQuotaPollingFreshnessAndBackoff(t *testing.T) {
 		t.Fatal("failure replaced successful data", got)
 	}
 }
+
 func TestClaudeQuotaAuthFailureGate(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	m, a, e := quotaProbeManager(t, func(context.Context, *Auth) (ClaudeQuotaSnapshot, error) {
 		return nil, &ClaudeQuotaProbeError{Status: 403}
 	})
-	for _, minutes := range []int{0, 1, 3, 20, 100} {
+	for _, minutes := range []int{0, 15, 45, 120, 200} {
 		m.refreshOneClaudeQuota(ctx, now.Add(time.Duration(minutes)*time.Minute))
 	}
 	if e.calls != 3 {
@@ -194,7 +193,7 @@ func TestClaudeQuotaAuthFailureGate(t *testing.T) {
 	m.mu.Lock()
 	m.auths[a.ID].Metadata["access_token"] = "sk-ant-oat01-replaced"
 	m.mu.Unlock()
-	m.refreshOneClaudeQuota(ctx, now.Add(101*time.Minute))
+	m.refreshOneClaudeQuota(ctx, now.Add(201*time.Minute))
 	if e.calls != 4 {
 		t.Fatal("credential replacement did not clear pause")
 	}
@@ -391,7 +390,7 @@ func TestClaudeQuotaValidToken401DoesNotRefreshInference(t *testing.T) {
 	m, a, e := quotaProbeManager(t, func(context.Context, *Auth) (ClaudeQuotaSnapshot, error) {
 		return nil, &ClaudeQuotaProbeError{Status: 401}
 	})
-	for _, minutes := range []int{0, 1, 3, 20} {
+	for _, minutes := range []int{0, 15, 45, 180} {
 		m.refreshOneClaudeQuota(ctx, now.Add(time.Duration(minutes)*time.Minute))
 	}
 	if e.calls != 3 || e.refreshCalls != 0 {
@@ -412,7 +411,7 @@ func TestClaudeQuotaExpired401UsesCoordinatedRefresh(t *testing.T) {
 	m.auths[a.ID].Metadata["expired"] = now.Add(-time.Hour).Format(time.RFC3339)
 	m.auths[a.ID].Metadata["refresh_token"] = "refresh"
 	m.mu.Unlock()
-	for _, minutes := range []int{0, 1, 3, 20} {
+	for _, minutes := range []int{0, 15, 30, 60, 180} {
 		m.refreshOneClaudeQuota(ctx, now.Add(time.Duration(minutes)*time.Minute))
 	}
 	if e.calls != 4 || e.refreshCalls != 1 {
@@ -478,7 +477,7 @@ func TestClaudeQuotaSideWindowsDoNotForcePolling(t *testing.T) {
 		headers.Set("Anthropic-Ratelimit-Unified-"+name+"-Utilization", "0.3")
 		headers.Set("Anthropic-Ratelimit-Unified-"+name+"-Reset", strconv.FormatInt(now.Add(24*time.Hour).Unix(), 10))
 	}
-	for minute := 1; minute <= 10; minute++ {
+	for minute := 1; minute <= 120; minute++ {
 		at := now.Add(time.Duration(minute) * time.Minute)
 		m.claudeQuota.observe(a, headers, at)
 		m.refreshOneClaudeQuota(ctx, at)

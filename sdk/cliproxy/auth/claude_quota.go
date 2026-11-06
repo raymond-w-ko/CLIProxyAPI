@@ -15,8 +15,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const claudeQuotaFreshness = time.Minute
-const claudeQuotaRankAge = 5 * time.Minute
+const (
+	claudeQuotaFreshness      = 5 * time.Minute
+	claudeQuotaRankAge        = 5 * time.Minute
+	claudeQuotaResetRankAge   = 24 * time.Hour
+	claudeQuotaCapabilityAge  = 24 * time.Hour
+	claudeQuotaPollInterval   = 15 * time.Minute
+	claudeQuotaPoolInterval   = 30 * time.Second
+	claudeQuotaRateLimitFloor = 30 * time.Minute
+	claudeQuotaMaxBackoff     = 2 * time.Hour
+	claudeQuotaPoolKey        = "claude-quota:pool-retry:v1"
+)
 
 // ClaudeQuotaWindow is an observation, separate from confirmed request cooldowns.
 // Unlimited is set only by an absent/null window in a valid full usage response.
@@ -40,23 +49,42 @@ type ClaudeQuotaFetcher interface {
 type ClaudeQuotaProbeError struct {
 	Status  int
 	RetryAt time.Time
+	Reason  string
+	Window  string
 }
 
 func (e *ClaudeQuotaProbeError) Error() string {
-	return fmt.Sprintf("Claude quota probe returned HTTP %d", e.Status)
+	return fmt.Sprintf("Claude quota probe failed (HTTP %d, %s)", e.Status, e.failureReason())
+}
+
+// Only fixed categories enter logs. Never include response bodies, URLs, or
+// arbitrary executor error text, which can contain credentials.
+func (e *ClaudeQuotaProbeError) failureReason() string {
+	switch e.Reason {
+	case "invalid_json", "missing_weekly_window", "invalid_window", "unsupported_credential", "transport_error", "read_error", "response_too_large":
+		return e.Reason
+	}
+	switch e.Status {
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "auth_rejected"
+	default:
+		return "http_error"
+	}
 }
 
 // ParseClaudeQuotaUsage parses a complete OAuth usage response. Header utilization
 // is a fraction; this endpoint's utilization is a percentage.
 func ParseClaudeQuotaUsage(raw []byte, now time.Time) (ClaudeQuotaSnapshot, error) {
 	if !ojson.ValidBytes(raw) || !ojson.ParseBytes(raw).IsObject() {
-		return nil, fmt.Errorf("invalid Claude quota response")
+		return nil, &ClaudeQuotaProbeError{Status: http.StatusOK, Reason: "invalid_json"}
 	}
 	doc := ojson.NewDoc(raw)
 	weekly := doc.Get("seven_day")
 	// An empty/error object must never imply unlimited quota.
 	if !weekly.IsObject() {
-		return nil, fmt.Errorf("Claude quota response lacks seven_day")
+		return nil, &ClaudeQuotaProbeError{Status: http.StatusOK, Reason: "missing_weekly_window"}
 	}
 	out := make(ClaudeQuotaSnapshot)
 	for _, field := range []struct{ json, window string }{
@@ -78,7 +106,7 @@ func ParseClaudeQuotaUsage(raw []byte, now time.Time) (ClaudeQuotaSnapshot, erro
 			errReset = nil
 		}
 		if !value.IsObject() || used.Type != ojson.Number || !validClaudeUtilization(used.Float()/100) || errReset != nil {
-			return nil, fmt.Errorf("invalid Claude quota window %s", field.json)
+			return nil, &ClaudeQuotaProbeError{Status: http.StatusOK, Reason: "invalid_window", Window: field.json}
 		}
 		out[field.window] = ClaudeQuotaWindow{Used: min(used.Float()/100, 1), Reset: reset, Observed: now}
 	}
@@ -130,8 +158,10 @@ type claudeQuotaRecord struct {
 func (r *claudeQuotaRecord) markDirty() { r.dirty = true; r.version++ }
 
 type claudeQuotaCache struct {
-	mu      sync.Mutex
-	records map[string]*claudeQuotaRecord
+	mu         sync.Mutex
+	records    map[string]*claudeQuotaRecord
+	poolNext   time.Time
+	poolLoaded bool
 }
 
 func newClaudeQuotaCache() *claudeQuotaCache {
@@ -193,7 +223,11 @@ func claudeQuotaProbeDue(r *claudeQuotaRecord, now time.Time) bool {
 		return false
 	}
 	for _, name := range []string{"5h", "7d"} {
-		if !claudeQuotaWindowFresh(r.Windows[name], now, claudeQuotaFreshness) {
+		age := claudeQuotaFreshness
+		if name == "5h" && r.Windows[name].Unlimited {
+			age = claudeQuotaCapabilityAge
+		}
+		if !claudeQuotaWindowFresh(r.Windows[name], now, age) {
 			return true
 		}
 	}
@@ -348,4 +382,53 @@ func (m *Manager) carryClaudeQuotaRefresh(base, updated *Auth) {
 	}
 	next.loaded = true
 	next.markDirty()
+}
+
+// The quota endpoint can limit a shared client/IP. This gate is independent of
+// credential grants so rotation, token refresh and restart cannot bypass it.
+func (c *claudeQuotaCache) loadPoolGate(ctx context.Context) {
+	c.mu.Lock()
+	loaded := c.poolLoaded
+	c.poolLoaded = true
+	c.mu.Unlock()
+	if loaded {
+		return
+	}
+	client, enabled, errClient := kvstore.CurrentKVClient()
+	if !enabled || errClient != nil {
+		return
+	}
+	raw, found, errGet := client.KVGet(ctx, claudeQuotaPoolKey)
+	if errGet != nil || !found || !ojson.ValidBytes(raw) {
+		return
+	}
+	next, errParse := time.Parse(time.RFC3339Nano, ojson.GetBytes(raw, "next").String())
+	if errParse != nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if next.After(c.poolNext) {
+		c.poolNext = next
+	}
+}
+func (c *claudeQuotaCache) poolBlocked(now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.poolNext.After(now)
+}
+func (c *claudeQuotaCache) deferPool(ctx context.Context, next time.Time) {
+	c.mu.Lock()
+	if next.Before(c.poolNext) {
+		next = c.poolNext
+	}
+	c.poolNext = next
+	c.mu.Unlock()
+	doc := ojson.NewDocString("{}")
+	if errSet := doc.Set("next", next); errSet != nil {
+		return
+	}
+	if errSave := saveClaudeQuotaKV(ctx, claudeQuotaPoolKey, doc.Bytes()); errSave != nil {
+		log.WithError(errSave).Warn("could not save Claude quota pool cooldown")
+	}
 }

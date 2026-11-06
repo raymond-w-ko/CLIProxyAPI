@@ -9,7 +9,7 @@ import (
 )
 
 // StartClaudeQuotaRefresh starts a single, cancelable worker. One request at a
-// time and a one-second gap spread startup reads across credentials. It remains
+// time and a 30-second gap spread startup reads across credentials. It remains
 // idle for other strategies and Home, including after config reload.
 func (m *Manager) StartClaudeQuotaRefresh(ctx context.Context) {
 	m.quotaWorkerMu.Lock()
@@ -28,7 +28,7 @@ func (m *Manager) StartClaudeQuotaRefresh(ctx context.Context) {
 				return
 			}
 			m.refreshOneClaudeQuota(ctx, time.Now())
-			timer := time.NewTimer(time.Second)
+			timer := time.NewTimer(claudeQuotaPoolInterval)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -61,6 +61,7 @@ func (m *Manager) refreshOneClaudeQuota(ctx context.Context, now time.Time) {
 	if soonestResetSelector(m.Selector()) == nil || m.runtimeConfigSnapshot().Home.Enabled {
 		return
 	}
+	m.claudeQuota.loadPoolGate(ctx)
 	auths := m.List()
 	activeKeys := make(map[string]bool, len(auths))
 	for _, a := range auths {
@@ -101,19 +102,20 @@ func (m *Manager) refreshOneClaudeQuota(ctx context.Context, now time.Time) {
 			r.markDirty()
 		}
 		due := claudeQuotaProbeDue(r, now)
-		if due {
-			r.Next = now.Add(time.Minute)
-			r.markDirty()
-		}
 		m.claudeQuota.mu.Unlock()
 		if due {
 			candidate = a
 			fetcher = f
 		}
 	}
-	if candidate == nil || ctx.Err() != nil {
+	if candidate == nil || ctx.Err() != nil || m.claudeQuota.poolBlocked(now) {
 		return
 	}
+	m.claudeQuota.mu.Lock()
+	record := m.claudeQuota.recordLocked(claudeQuotaKey(candidate))
+	record.Next = now.Add(claudeQuotaPollInterval)
+	record.markDirty()
+	m.claudeQuota.mu.Unlock()
 	// Save the attempt gate before sending so restart cannot hammer the endpoint.
 	m.claudeQuota.save(ctx, candidate, now, true)
 	probeCtx := ctx
@@ -136,7 +138,7 @@ func (m *Manager) refreshOneClaudeQuota(ctx context.Context, now time.Time) {
 				// The expired token's rejection says nothing about the new grant.
 				m.claudeQuota.mu.Lock()
 				next := m.claudeQuota.recordLocked(claudeQuotaKey(refreshed))
-				next.Next = now.Add(time.Minute)
+				next.Next = now.Add(claudeQuotaPollInterval)
 				next.markDirty()
 				m.claudeQuota.mu.Unlock()
 				m.claudeQuota.save(ctx, refreshed, time.Now(), true)
@@ -147,6 +149,14 @@ func (m *Manager) refreshOneClaudeQuota(ctx context.Context, now time.Time) {
 	if ctx.Err() != nil {
 		return
 	}
+	var poolRetry time.Time
+	if probeErr != nil && probeErr.Status == 429 {
+		poolRetry = now.Add(claudeQuotaRateLimitFloor)
+		if probeErr.RetryAt.After(poolRetry) {
+			poolRetry = probeErr.RetryAt
+		}
+	}
+	var failureFields log.Fields
 	m.mu.RLock()
 	current := m.auths[candidate.ID]
 	valid := current != nil && current.RegistrationEpoch == candidate.RegistrationEpoch && claudeQuotaKey(current) == claudeQuotaKey(candidate)
@@ -161,15 +171,18 @@ func (m *Manager) refreshOneClaudeQuota(ctx context.Context, now time.Time) {
 			r.AuthFailures = 0
 		} else {
 			r.Failures++
-			delay := time.Minute
-			for n := 1; n < r.Failures && delay < 30*time.Minute; n++ {
+			delay := claudeQuotaPollInterval
+			for n := 1; n < r.Failures && delay < claudeQuotaMaxBackoff; n++ {
 				delay *= 2
 			}
-			if delay > 30*time.Minute {
-				delay = 30 * time.Minute
+			if delay > claudeQuotaMaxBackoff {
+				delay = claudeQuotaMaxBackoff
 			}
 			r.Next = now.Add(delay)
 			if probeErr != nil {
+				if poolRetry.After(r.Next) {
+					r.Next = poolRetry
+				}
 				if probeErr.Status == 401 || probeErr.Status == 403 {
 					r.AuthFailures++
 					r.Paused = r.AuthFailures >= 3 || terminal
@@ -178,13 +191,32 @@ func (m *Manager) refreshOneClaudeQuota(ctx context.Context, now time.Time) {
 					r.Next = probeErr.RetryAt
 				}
 			}
-			log.WithFields(log.Fields{"auth_id": candidate.ID, "paused": r.Paused}).Warn("Claude quota refresh failed; inference ownership is unchanged")
+			failureFields = claudeQuotaFailureFields(candidate.ID, r, probeErr)
 		}
 		r.markDirty()
 		m.claudeQuota.mu.Unlock()
 	}
 	m.mu.RUnlock()
+	if !poolRetry.IsZero() {
+		m.claudeQuota.deferPool(ctx, poolRetry)
+	}
+	if failureFields != nil {
+		log.WithFields(failureFields).Warn("Claude quota refresh failed; inference ownership is unchanged")
+	}
 	if valid {
 		m.claudeQuota.save(ctx, candidate, time.Now(), true)
 	}
+}
+
+func claudeQuotaFailureFields(id string, r *claudeQuotaRecord, probe *ClaudeQuotaProbeError) log.Fields {
+	fields := log.Fields{"auth_id": id, "paused": r.Paused, "failures": r.Failures, "auth_failures": r.AuthFailures, "retry_at": r.Next.UTC().Format(time.RFC3339), "failure_reason": "unexpected_error"}
+	if probe != nil {
+		fields["http_status"] = probe.Status
+		fields["failure_reason"] = probe.failureReason()
+		switch probe.Window {
+		case "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included":
+			fields["window"] = probe.Window
+		}
+	}
+	return fields
 }
