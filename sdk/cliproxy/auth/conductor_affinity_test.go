@@ -47,6 +47,70 @@ func durableTestPick(m *Manager, model string, opts cliproxyexecutor.Options) (*
 	return a, errPick
 }
 
+func TestDurableAffinityTerminalResponseKeepsOwner(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusBadGateway} {
+		for _, mode := range []string{"execute", "count", "stream", "bootstrap"} {
+			t.Run(fmt.Sprintf("%d/%s", status, mode), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "bindings.json")
+				m, ids := durableTestManager(t, path)
+				m.SetRetryConfig(1, 0, 2)
+				opts := durableTestOptions()
+				opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+				if owner, errPick := durableTestPick(m, "model-one", opts); errPick != nil || owner.ID != ids[1] {
+					t.Fatalf("initial owner = %v, %v", owner, errPick)
+				}
+				opts = durableTestOptions()
+				before, errRead := os.ReadFile(path)
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				terminal := &cliproxyexecutor.RequestTerminatedError{HTTPStatus: status, Body: []byte(`{"detail":"terminal response"}`)}
+				var attempts []string
+				fail := func(_ context.Context, a *Auth) (cliproxyexecutor.Response, error) {
+					attempts = append(attempts, a.ID)
+					return cliproxyexecutor.Response{}, terminal
+				}
+				executor := &claudeCancellationTestExecutor{executeFn: fail, countFn: fail,
+					streamFn: func(_ context.Context, a *Auth) (*cliproxyexecutor.StreamResult, error) {
+						attempts = append(attempts, a.ID)
+						if mode != "bootstrap" {
+							return nil, terminal
+						}
+						chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+						chunks <- cliproxyexecutor.StreamChunk{Err: terminal}
+						close(chunks)
+						return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+					}}
+				m.RegisterExecutor(executor)
+				req := cliproxyexecutor.Request{Model: "model-one"}
+				var errExecute error
+				switch mode {
+				case "execute":
+					_, errExecute = m.Execute(context.Background(), []string{"claude"}, req, opts)
+				case "count":
+					_, errExecute = m.ExecuteCount(context.Background(), []string{"claude"}, req, opts)
+				default:
+					_, errExecute = m.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+				}
+				requireTerminalResponse(t, errExecute, terminal)
+				if len(attempts) != 1 || attempts[0] != ids[1] || executor.refreshCalls.Load() != 0 {
+					t.Fatalf("terminal response retried or refreshed: attempts=%v refreshes=%d", attempts, executor.refreshCalls.Load())
+				}
+				requireClaudeCancellationNeutral(t, m, ids[1], "model-one")
+				after, errRead := os.ReadFile(path)
+				if errRead != nil || string(before) != string(after) {
+					t.Fatalf("terminal response changed saved bindings: %v", errRead)
+				}
+				restarted, _ := durableTestManager(t, path)
+				if owner, errPick := durableTestPick(restarted, "model-two", durableTestOptions()); errPick != nil || owner.ID != ids[1] {
+					t.Fatalf("restarted owner = %v, %v", owner, errPick)
+				}
+			})
+		}
+	}
+}
+
 func TestDurableAffinityUnsupportedCountKeepsOwnerAvailable(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for _, tc := range []struct {
