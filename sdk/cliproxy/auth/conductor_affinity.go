@@ -72,6 +72,11 @@ func durableSessionKey(provider, sessionID string, opts cliproxyexecutor.Options
 func (m *Manager) durableOwnerExhaustion(authID, model string) (string, time.Time) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// Never mode keeps the saved owner even when confirmed quota would normally
+	// permit migration. Apply this to picks, retries, and alternate-target probes.
+	if s, ok := m.selector.(*SessionAffinitySelector); ok && s.file != "" && s.rebindOnNever {
+		return "", time.Time{}
+	}
 	a := m.auths[authID]
 	if a == nil || a.Disabled || a.Status == StatusDisabled {
 		return "", time.Time{}

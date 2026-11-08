@@ -251,7 +251,7 @@ func TestDurableAffinityRestartModelsAndReload(t *testing.T) {
 
 func TestDurableAffinityFailurePolicy(t *testing.T) {
 	withQuotaCooldownEnabled(t)
-	for _, rebindOn := range []string{SessionAffinityRebindOnAny, SessionAffinityRebindOnQuota} {
+	for _, rebindOn := range []string{SessionAffinityRebindOnAny, SessionAffinityRebindOnQuota, SessionAffinityRebindOnNever} {
 		t.Run(rebindOn, func(t *testing.T) {
 			for _, tc := range []struct {
 				name    string
@@ -281,7 +281,7 @@ func TestDurableAffinityFailurePolicy(t *testing.T) {
 						Error: &Error{HTTPStatus: tc.code, Message: message}, CredentialScope: tc.scope, RetryAfter: &cooldown})
 					// The tried set must not allow ordinary errors to escape the durable owner.
 					a, _, _, errPick := m.pickNextMixed(context.Background(), []string{"claude"}, "model-one", opts, map[string]struct{}{ids[0]: {}})
-					if tc.migrate {
+					if tc.migrate && rebindOn != SessionAffinityRebindOnNever {
 						if errPick != nil || a.ID != ids[1] {
 							t.Fatalf("quota migration = %v, %v", a, errPick)
 						}
@@ -301,6 +301,69 @@ func TestDurableAffinityFailurePolicy(t *testing.T) {
 						t.Fatalf("temporary failure migrated: %v, %v", a, errPick)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestDurableAffinityNeverQuotaSurvivesRestart(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, credentialQuota := range []bool{false, true} {
+		t.Run(fmt.Sprintf("credential_quota=%t", credentialQuota), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManagerWithRebindOn(t, path, SessionAffinityRebindOnNever)
+			opts := durableTestOptions()
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+			if owner, errPick := durableTestPick(m, "model-one", opts); errPick != nil || owner.ID != ids[1] {
+				t.Fatalf("initial owner = %v, %v", owner, errPick)
+			}
+			opts = durableTestOptions()
+			retryAfter := time.Hour
+			quota := &Error{HTTPStatus: 429, Code: ErrorCodeModelQuota, Message: "confirmed quota"}
+			m.MarkResult(context.Background(), Result{AuthID: ids[1], Provider: "claude", Model: "model-one", Options: opts,
+				Error: quota, CredentialScope: credentialQuota, RetryAfter: &retryAfter})
+			before, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			cooled, _ := m.GetByID(ids[1])
+			restarted, _ := durableTestManagerWithRebindOn(t, path, SessionAffinityRebindOnNever)
+			if _, errUpdate := restarted.Update(WithSkipPersist(context.Background()), cooled); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			for _, manager := range []*Manager{m, restarted} {
+				if owner, errOwner := manager.durableRetryOwner([]string{"claude"}, "model-one", opts); errOwner != nil || owner != ids[1] {
+					t.Fatalf("retry owner = %q, %v", owner, errOwner)
+				}
+				if manager.HasAlternativeTargetForModel(context.Background(), []string{"claude"}, "model-one", opts, ids[1]) {
+					t.Fatal("never mode permitted alternate-account replay")
+				}
+				if owner, errPick := durableTestPick(manager, "model-one", opts); errPick == nil || owner != nil {
+					t.Fatalf("quota migrated in never mode: %v, %v", owner, errPick)
+				}
+				owner, errPick := durableTestPick(manager, "model-two", opts)
+				if credentialQuota {
+					if errPick == nil || owner != nil {
+						t.Fatalf("model change bypassed exhausted owner: %v, %v", owner, errPick)
+					}
+				} else if errPick != nil || owner.ID != ids[1] {
+					t.Fatalf("model change lost owner: %v, %v", owner, errPick)
+				}
+			}
+			after, errRead := os.ReadFile(path)
+			if errRead != nil || string(after) != string(before) {
+				t.Fatalf("never mode changed saved binding: %v", errRead)
+			}
+			// Error normalization must find the durable owner with a cold memory
+			// cache and a model it has not seen, while keeping callers isolated.
+			failure := &Error{HTTPStatus: 502, Message: "temporary upstream error"}
+			if errNormalized := restarted.normalizeSessionAffinityNeverTerminalError(failure, []string{"claude"}, "new-model", opts); !isSessionAffinityRetryError(errNormalized) {
+				t.Fatalf("cold durable owner was not found: %v", errNormalized)
+			}
+			otherCaller := durableTestOptions()
+			otherCaller.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = "other-caller"
+			if errNormalized := restarted.normalizeSessionAffinityNeverTerminalError(failure, []string{"claude"}, "new-model", otherCaller); errNormalized != failure {
+				t.Fatalf("normalization crossed caller scopes: %v", errNormalized)
 			}
 		})
 	}
@@ -802,26 +865,30 @@ func TestDurableAffinityCanceledStreamQuotaPolicy(t *testing.T) {
 }
 
 func TestDurableAffinityCallerIsolationAndChildInheritance(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bindings.json")
-	m, ids := durableTestManager(t, path)
-	for i, scope := range []string{"client-one", "client-two"} {
-		opts := durableTestOptions()
-		opts.Headers = http.Header{"X-Claude-Code-Session-Id": {"parent"}}
-		opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = scope
-		opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[i]
-		if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
-			t.Fatal(errPick)
-		}
-	}
-	restarted, _ := durableTestManager(t, path)
-	for i, scope := range []string{"client-one", "client-two"} {
-		opts := durableTestOptions()
-		opts.Headers = http.Header{"X-Claude-Code-Session-Id": {"parent"}, "X-Claude-Code-Agent-Id": {"child"}}
-		opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = scope
-		a, errPick := durableTestPick(restarted, "model-two", opts)
-		if errPick != nil || a.ID != ids[i] {
-			t.Fatalf("child inheritance for %s: %v, %v", scope, a, errPick)
-		}
+	for _, rebindOn := range []string{SessionAffinityRebindOnAny, SessionAffinityRebindOnQuota, SessionAffinityRebindOnNever} {
+		t.Run(rebindOn, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManagerWithRebindOn(t, path, rebindOn)
+			for i, scope := range []string{"client-one", "client-two"} {
+				opts := durableTestOptions()
+				opts.Headers = http.Header{"X-Claude-Code-Session-Id": {"parent"}}
+				opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = scope
+				opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[i]
+				if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+					t.Fatal(errPick)
+				}
+			}
+			restarted, _ := durableTestManagerWithRebindOn(t, path, rebindOn)
+			for i, scope := range []string{"client-one", "client-two"} {
+				opts := durableTestOptions()
+				opts.Headers = http.Header{"X-Claude-Code-Session-Id": {"parent"}, "X-Claude-Code-Agent-Id": {"child"}}
+				opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = scope
+				a, errPick := durableTestPick(restarted, "model-two", opts)
+				if errPick != nil || a.ID != ids[i] {
+					t.Fatalf("child inheritance for %s: %v, %v", scope, a, errPick)
+				}
+			}
+		})
 	}
 }
 

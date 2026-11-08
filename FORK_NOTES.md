@@ -13,6 +13,9 @@ The routing strategy chooses accounts for new sessions and permitted migrations.
   including when using `--config`. No extra file-path setting is needed.
 - Only confirmed quota exhaustion for the account or requested model permits
   migration. The replacement stays the owner after the old account recovers.
+- `session-affinity-rebind-on: never` also prevents migration after confirmed
+  quota exhaustion. The default `any` and `quota` both use this fork's quota-only
+  migration rule for durable sessions.
 - Generic HTTP 429, billing-only rejection, authentication failure, policy refusal,
   and temporary network errors keep the owner. Existing retry and wait limits
   apply. The fork adds no retry loop or request timeout.
