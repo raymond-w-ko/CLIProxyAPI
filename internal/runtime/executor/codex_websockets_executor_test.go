@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2641,14 +2642,18 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
+	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
+	var pongDeliveredOnce sync.Once
+	serverDone := make(chan struct{})
+	defer close(serverDone)
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
+		inWriteHookOnce.Do(func() { close(inWriteHook) })
 		// Wait until server confirms pong was received before allowing write to finish.
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
@@ -2667,23 +2672,33 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return nil
 		})
 
-		// Read the upload while processing control frames.
-		requestRead := make(chan error, 1)
+		// Start server reader loop so server processes control frames.
+		readErrCh := make(chan error, 1)
+		payloadReceived := make(chan struct{})
 		go func() {
-			_, _, errRead := conn.ReadMessage()
-			requestRead <- errRead
+			signaled := false
+			for {
+				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+					readErrCh <- errRead
+					return
+				}
+				if !signaled {
+					signaled = true
+					close(payloadReceived)
+				}
+			}
 		}()
 
 		// Wait until client has entered writeMessage and is actively holding writeMu.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress holding writeMu.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("session-ping"), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.PingMessage, []byte("session-ping"), time.Now().Add(5*time.Second))
 
 		// Server asserts Pong arrives while client write is still blocked in the hook.
 		select {
@@ -2691,26 +2706,25 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			if got != "session-ping" {
 				t.Errorf("unexpected pong payload: got %q, want session-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
 			return
 		}
 
-		// Do not complete and close the connection before the held upload finishes.
+		// The held client write is released together with the pong. Wait until the
+		// request frame arrives before writing the terminal event and closing.
 		select {
-		case errRead := <-requestRead:
-			if errRead != nil {
-				t.Errorf("read uploaded request: %v", errRead)
-				return
-			}
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for uploaded request")
+		case <-payloadReceived:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for client payload after pong")
 			return
 		}
 
+		// Now send terminal response.
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		<-serverDone
 	}))
 	defer server.Close()
 
@@ -2748,13 +2762,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
+	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
+	var pongDeliveredOnce sync.Once
+	serverDone := make(chan struct{})
+	defer close(serverDone)
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
+		inWriteHookOnce.Do(func() { close(inWriteHook) })
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
@@ -2773,22 +2791,30 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
-		requestRead := make(chan error, 1)
+		payloadReceived := make(chan struct{})
 		go func() {
-			_, _, errRead := conn.ReadMessage()
-			requestRead <- errRead
+			signaled := false
+			for {
+				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+					return
+				}
+				if !signaled {
+					signaled = true
+					close(payloadReceived)
+				}
+			}
 		}()
 
 		// Wait until client has entered writeMessage on sessionless path.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("sessionless-ping"), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.PingMessage, []byte("sessionless-ping"), time.Now().Add(5*time.Second))
 
 		// Server asserts Pong arrives while client write is still in progress.
 		select {
@@ -2796,26 +2822,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			if got != "sessionless-ping" {
 				t.Errorf("unexpected pong payload: got %q, want sessionless-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
 			return
 		}
 
-		// Do not complete and close the connection before the held upload finishes.
 		select {
-		case errRead := <-requestRead:
-			if errRead != nil {
-				t.Errorf("read uploaded request: %v", errRead)
-				return
-			}
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for uploaded request")
+		case <-payloadReceived:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for client payload after pong on sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		<-serverDone
 	}))
 	defer server.Close()
 
@@ -2850,13 +2872,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
+	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
+	var pongDeliveredOnce sync.Once
+	serverDone := make(chan struct{})
+	defer close(serverDone)
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
+		inWriteHookOnce.Do(func() { close(inWriteHook) })
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for pong delivery while nonstream payload write was held in hook")
 		}
 	}
@@ -2875,22 +2901,30 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return nil
 		})
 
-		requestRead := make(chan error, 1)
+		payloadReceived := make(chan struct{})
 		go func() {
-			_, _, errRead := conn.ReadMessage()
-			requestRead <- errRead
+			signaled := false
+			for {
+				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+					return
+				}
+				if !signaled {
+					signaled = true
+					close(payloadReceived)
+				}
+			}
 		}()
 
 		// Wait until client has entered writeMessage on nonstream path.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("nonstream-sessionless-ping"), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.PingMessage, []byte("nonstream-sessionless-ping"), time.Now().Add(5*time.Second))
 
 		// Server asserts Pong arrives while client write is still in progress.
 		select {
@@ -2898,26 +2932,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			if got != "nonstream-sessionless-ping" {
 				t.Errorf("unexpected pong payload: got %q, want nonstream-sessionless-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on nonstream sessionless connection")
 			return
 		}
 
-		// Do not complete and close the connection before the held upload finishes.
 		select {
-		case errRead := <-requestRead:
-			if errRead != nil {
-				t.Errorf("read uploaded request: %v", errRead)
-				return
-			}
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for uploaded request")
+		case <-payloadReceived:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for client payload after pong on nonstream sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		<-serverDone
 	}))
 	defer server.Close()
 

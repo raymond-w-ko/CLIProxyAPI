@@ -47,6 +47,68 @@ func durableTestPick(m *Manager, model string, opts cliproxyexecutor.Options) (*
 	return a, errPick
 }
 
+func TestDurableAffinityWeightedCompensationKeepsOwner(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		for _, rebindOn := range []string{"any", "quota", "never"} {
+			t.Run(provider+"/"+rebindOn, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "bindings.json")
+				ids := []string{t.Name() + "-a", t.Name() + "-b"}
+				newManager := func() (*Manager, *WeightedRoundRobinSelector) {
+					weighted := &WeightedRoundRobinSelector{}
+					selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{File: path, Fallback: weighted, RebindOn: rebindOn})
+					t.Cleanup(selector.Stop)
+					manager := NewManager(nil, selector, nil)
+					manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
+					for i, id := range ids {
+						weight := "1"
+						if i == 0 {
+							weight = "3"
+						}
+						_, errRegister := manager.Register(WithSkipPersist(t.Context()), &Auth{
+							ID: id, Provider: provider, Status: StatusActive, Attributes: map[string]string{AttributeWeight: weight},
+						})
+						if errRegister != nil {
+							t.Fatal(errRegister)
+						}
+						registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: "model-one"}})
+						t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+					}
+					return manager, weighted
+				}
+				pick := func(manager *Manager, opts cliproxyexecutor.Options, want string) {
+					t.Helper()
+					a, _, errPick := manager.pickNext(t.Context(), provider, "model-one", opts, nil)
+					if errPick != nil || a == nil || a.ID != want {
+						t.Fatalf("pick = %v, %v; want %s", a, errPick, want)
+					}
+				}
+				manager, weighted := newManager()
+				opts := durableTestOptions()
+				opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[1]
+				pick(manager, opts, ids[1])
+				for range 3 {
+					pick(manager, durableTestOptions(), ids[1])
+				}
+				state := weightedStateForTest(t, weighted, provider+":model-one", ids...)
+				if state.currentForTest()[ids[0]] != 12 || state.currentForTest()[ids[1]] != -12 || state.inFlight != 0 {
+					t.Fatalf("durable traffic lost weighted accounting: current=%v inFlight=%d", state.currentForTest(), state.inFlight)
+				}
+				for i := range 12 {
+					fresh := durableTestOptions()
+					fresh.Headers.Set("X-Session-Id", fmt.Sprintf("fresh-%d", i))
+					pick(manager, fresh, ids[0])
+				}
+				if state.currentForTest()[ids[0]] != 0 || state.currentForTest()[ids[1]] != 0 || state.inFlight != 0 {
+					t.Fatalf("compensation did not settle: current=%v inFlight=%d", state.currentForTest(), state.inFlight)
+				}
+				pick(manager, durableTestOptions(), ids[1])
+				restarted, _ := newManager()
+				pick(restarted, durableTestOptions(), ids[1])
+			})
+		}
+	}
+}
+
 func TestDurableAffinityTerminalResponseKeepsOwner(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusBadGateway} {
@@ -1089,6 +1151,44 @@ func TestDurableAffinityChildMigrationDoesNotRebindParent(t *testing.T) {
 		if a, errPick := durableTestPick(restarted, "model-two", opts); errPick != nil || a.ID != ids[i] {
 			t.Fatalf("parent/child owners were merged: %v, %v", a, errPick)
 		}
+	}
+}
+
+func TestDurableAffinityAliasCooldownMigrationPolicy(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, code := range []string{"", ErrorCodeModelQuota} {
+		t.Run("code="+code, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			m, ids := durableTestManager(t, path)
+			opts := durableTestOptions()
+			if _, errPick := durableTestPick(m, "model-one", opts); errPick != nil {
+				t.Fatal(errPick)
+			}
+			// An old alias state must follow its configured target after reload.
+			cooldown := time.Hour
+			m.MarkResult(t.Context(), Result{AuthID: ids[0], Provider: "claude", Model: "FRIENDLY-MODEL",
+				Error: &Error{Code: code, HTTPStatus: 429, Message: "rate limit"}, RetryAfter: &cooldown})
+			m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+				"claude": {{Name: "model-one", Alias: "friendly-model", Fork: true}},
+			})
+			if a, errPick := durableTestPick(m, "model-two", opts); errPick != nil || a.ID != ids[0] {
+				t.Fatalf("alias cooldown moved a healthy sibling: %v, %v", a, errPick)
+			}
+			a, errPick := durableTestPick(m, "model-one", opts)
+			if code == ErrorCodeModelQuota {
+				if errPick != nil || a == nil || a.ID != ids[1] {
+					t.Fatalf("confirmed alias quota did not permit migration: %v, %v", a, errPick)
+				}
+			} else {
+				if errPick == nil || a != nil {
+					t.Fatalf("generic alias cooldown escaped the owner: %v, %v", a, errPick)
+				}
+				restarted, _ := durableTestManager(t, path)
+				if a, errPick := durableTestPick(restarted, "model-one", opts); errPick != nil || a.ID != ids[0] {
+					t.Fatalf("generic alias cooldown changed the saved owner: %v, %v", a, errPick)
+				}
+			}
+		})
 	}
 }
 
