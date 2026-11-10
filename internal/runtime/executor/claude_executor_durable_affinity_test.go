@@ -166,6 +166,14 @@ func TestClaudeDurableAffinityAndDateSurviveRestart(t *testing.T) {
 }
 
 func TestClaudeDurableAffinityModelQuota(t *testing.T) {
+	testClaudeDurableAffinityModelQuota(t, "claude-fable-5-1")
+}
+
+func TestClaudeDurableAffinityFable52ModelQuota(t *testing.T) {
+	testClaudeDurableAffinityModelQuota(t, "claude-fable-5-2")
+}
+
+func testClaudeDurableAffinityModelQuota(t *testing.T, model string) {
 	for _, mode := range []string{"execute", "stream", "count", "compact", "compact-stream"} {
 		for _, scenarioName := range []string{"model quota", "both exhausted", "generic 429", "per-minute rate", "overage billing", "model quota with billing", "model quota without 5h", "overage billing without 5h", "policy refusal"} {
 			if mode == "count" && scenarioName == "policy refusal" {
@@ -174,7 +182,6 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 			t.Run(mode+"/"+scenarioName, func(t *testing.T) {
 				scenario := strings.TrimSuffix(scenarioName, " without 5h")
 				missing5h := scenario != scenarioName
-				const model = "claude-fable-5-1"
 				var mu sync.Mutex
 				attempts := map[string]int{}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -230,11 +237,11 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					}
 					if mode == "stream" {
 						w.Header().Set("Content-Type", "text/event-stream")
-						_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-fable-5-1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+						_, _ = io.WriteString(w, strings.ReplaceAll("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-fable-5-1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "claude-fable-5-1", model))
 					} else if mode == "count" {
 						_, _ = io.WriteString(w, `{"input_tokens":1}`)
 					} else {
-						_, _ = io.WriteString(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-fable-5-1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+						_, _ = io.WriteString(w, strings.ReplaceAll(`{"id":"msg_test","type":"message","role":"assistant","model":"claude-fable-5-1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, "claude-fable-5-1", model))
 					}
 				}))
 				defer server.Close()
@@ -263,11 +270,11 @@ func TestClaudeDurableAffinityModelQuota(t *testing.T) {
 					}
 				}
 				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"stable"}}}
-				req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"claude-fable-5-1","messages":[{"role":"user","content":"test"}],"max_tokens":16}`)}
+				req := cliproxyexecutor.Request{Model: model, Payload: []byte(strings.ReplaceAll(`{"model":"claude-fable-5-1","messages":[{"role":"user","content":"test"}],"max_tokens":16}`, "claude-fable-5-1", model))}
 				if mode == "compact" || mode == "compact-stream" {
 					opts.SourceFormat = sdktranslator.FormatOpenAIResponse
 					opts.Alt = "responses/compact"
-					req.Payload = []byte(`{"model":"claude-fable-5-1","input":"Summarize this test conversation."}`)
+					req.Payload = []byte(strings.ReplaceAll(`{"model":"claude-fable-5-1","input":"Summarize this test conversation."}`, "claude-fable-5-1", model))
 				}
 				invoke := func() error {
 					switch mode {
