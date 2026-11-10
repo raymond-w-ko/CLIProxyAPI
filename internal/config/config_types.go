@@ -537,7 +537,9 @@ type RoutingConfig struct {
 
 	// SessionAffinity enables durable, provider-wide session ownership in standalone services.
 	// Bindings are stored beside the configuration file in session-bindings.json.
-	// Requires explicit session IDs. Only confirmed credential or requested-model quota exhaustion
+	// Requires explicit session IDs.
+	// Full-history compaction must retain the same explicit session ID, such as X-Session-ID.
+	// Only confirmed credential or requested-model quota exhaustion
 	// permits automatic migration; temporary errors retain the owner.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
@@ -924,6 +926,7 @@ type CodexModel struct {
 	// Use this for third-party Responses-compatible endpoints that do not accept
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.
+	// When enabled, compaction_trigger items also use local summary compaction.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
 	// SupportConfigurationUpdate enables configuration_update for this API-key model.

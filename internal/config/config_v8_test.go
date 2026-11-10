@@ -933,3 +933,32 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
 		})
 	}
 }
+
+func TestV8ExampleDocumentsSessionAffinityCompactionGuidance(t *testing.T) {
+	example, errRead := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var doc yaml.Node
+	if errUnmarshal := yaml.Unmarshal(example, &doc); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	routing := yamlPath(doc.Content[0], "routing")
+	if routing == nil {
+		t.Fatal("config.example.yaml is missing routing block")
+	}
+	idx := findMapKeyIndex(routing, "session-affinity")
+	if idx < 0 {
+		t.Fatal("config.example.yaml is missing routing.session-affinity")
+	}
+	comment := routing.Content[idx].HeadComment
+	for _, required := range []string{
+		"Requires a stable explicit session ID",
+		"Full-history compaction must keep the same explicit ID",
+		"X-Session-ID",
+	} {
+		if !strings.Contains(comment, required) {
+			t.Fatalf("routing.session-affinity comment in config.example.yaml is missing %q; got:\n%s", required, comment)
+		}
+	}
+}
