@@ -12,6 +12,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -1203,15 +1204,42 @@ func TestDurableAffinityModelQuotaScopeAndPersistence(t *testing.T) {
 		t.Fatal(errPick)
 	}
 	cooldown := time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+	markCtx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(markCtx, http.Header{
+		"Anthropic-Ratelimit-Unified-7d_oi-Status": {"rejected"},
+	})
+	m.MarkResult(markCtx, Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
 		Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429, Message: "confirmed model quota"}, RetryAfter: &cooldown})
+	owner, _ := m.GetByID(ids[0])
+	confirmedDeadline := owner.ModelStates["model-one"].Quota.NextRecoverAt
 	// A late concurrent generic response cannot erase the already confirmed window.
-	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
-		Error: &Error{HTTPStatus: 429, Message: "rate limit"}})
+	// Its longer retry delay and different headers must not replace that window.
+	longerCooldown := 2 * time.Hour
+	internallogging.SetResponseHeaders(markCtx, http.Header{
+		"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"},
+	})
+	m.MarkResult(markCtx, Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+		Error: &Error{HTTPStatus: 429, Message: "rate limit"}, RetryAfter: &longerCooldown})
+	owner, _ = m.GetByID(ids[0])
+	signals := owner.ModelStates["model-one"].Quota.cooldownSignals
+	if signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] != "rejected" ||
+		signals["Anthropic-Ratelimit-Unified-5h-Status"] != "" {
+		t.Fatalf("generic rate limit replaced the confirmed rejection headers: %v", signals)
+	}
 	restarted, _ := durableTestManager(t, path)
 	restarted.SetCooldownStateStore(store)
 	if errRestore := restarted.RestoreCooldownStates(context.Background()); errRestore != nil {
 		t.Fatal(errRestore)
+	}
+	owner, _ = restarted.GetByID(ids[0])
+	quota := owner.ModelStates["model-one"].Quota
+	if quota.Reason != ErrorCodeModelQuota || !quota.NextRecoverAt.Equal(confirmedDeadline) {
+		t.Fatalf("restart changed the confirmed quota window: %+v", quota)
+	}
+	// The later generic retry deadline is longer than the quota window. Upstream
+	// deliberately omits quota headers for that wait when persisting cooldowns.
+	if len(quota.cooldownSignals) != 0 {
+		t.Fatalf("restart attached quota headers to the longer generic wait: %v", quota.cooldownSignals)
 	}
 	// A healthy sibling model must not authorize moving the same session.
 	if a, errPick := durableTestPick(restarted, "model-two", opts); errPick != nil || a.ID != ids[0] {
