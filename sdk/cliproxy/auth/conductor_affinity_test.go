@@ -15,6 +15,8 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func durableTestManager(t *testing.T, path string) (*Manager, []string) {
@@ -46,6 +48,77 @@ func durableTestOptions() cliproxyexecutor.Options {
 func durableTestPick(m *Manager, model string, opts cliproxyexecutor.Options) (*Auth, error) {
 	a, _, _, errPick := m.pickNextMixed(context.Background(), []string{"claude"}, model, opts, nil)
 	return a, errPick
+}
+
+func TestDurableAffinityClaudeThreadCannotRestorePreviousOwner(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bindings.json")
+			manager, ids := durableTestManager(t, path)
+			configure := func(m *Manager) {
+				m.SetRetryConfig(0, 0, 0)
+				m.RegisterExecutor(&authFallbackExecutor{id: "claude"})
+			}
+			configure(manager)
+			opts := durableTestOptions()
+			opts.SourceFormat = sdktranslator.FormatClaude
+			opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = t.Name()
+			execute := func(m *Manager, payload string) (string, error) {
+				request := cliproxyexecutor.Request{Model: "model-one", Payload: []byte(payload)}
+				if !stream {
+					response, errExecute := m.Execute(context.Background(), []string{"claude"}, request, opts)
+					return string(response.Payload), errExecute
+				}
+				response, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, request, opts)
+				if errStream != nil {
+					return "", errStream
+				}
+				var body []byte
+				for chunk := range response.Chunks {
+					if chunk.Err != nil {
+						return "", chunk.Err
+					}
+					body = append(body, chunk.Payload...)
+				}
+				return string(body), nil
+			}
+			const create = `{"thread":{"type":"create"},"messages":[{"role":"user","content":"full replay"}]}`
+			const continuation = `{"thread":{"type":"continue","previous_message_id":"message-a"},"messages":[{"role":"user","content":"next"}]}`
+			if owner, errExecute := execute(manager, create); errExecute != nil || owner != ids[0] {
+				t.Fatalf("initial owner = %q, %v", owner, errExecute)
+			}
+			cliproxysession.RememberClaudeThreadAuth(t.Name(), "message-a", ids[0])
+			if owner, errExecute := execute(manager, continuation); errExecute != nil || owner != ids[0] {
+				t.Fatalf("Thread continuation lost the saved owner: %q, %v", owner, errExecute)
+			}
+			cooldown := time.Hour
+			manager.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "claude", Model: "model-one",
+				Error: &Error{Code: ErrorCodeModelQuota, HTTPStatus: 429}, RetryAfter: &cooldown})
+			before, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if owner, errExecute := execute(manager, continuation); errExecute == nil {
+				t.Fatalf("account-local Thread migrated without replay: %q", owner)
+			}
+			after, errRead := os.ReadFile(path)
+			if errRead != nil || string(after) != string(before) {
+				t.Fatalf("blocked Thread continuation changed saved ownership: %v", errRead)
+			}
+			if owner, errExecute := execute(manager, create); errExecute != nil || owner != ids[1] {
+				t.Fatalf("full replay did not migrate after confirmed quota: %q, %v", owner, errExecute)
+			}
+			restarted, _ := durableTestManager(t, path)
+			configure(restarted)
+			if owner, errExecute := execute(restarted, continuation); errExecute == nil {
+				t.Fatalf("old Thread restored its previous owner after restart: %q", owner)
+			}
+			if owner, errExecute := execute(restarted, create); errExecute != nil || owner != ids[1] {
+				t.Fatalf("replacement did not retain ownership after restart: %q, %v", owner, errExecute)
+			}
+		})
+	}
 }
 
 func TestDurableAffinityWeightedCompensationKeepsOwner(t *testing.T) {

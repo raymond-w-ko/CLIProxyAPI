@@ -44,6 +44,12 @@ migration but no replacement is eligible, the old binding remains. Keep credenti
 IDs stable. Account affinity reduces unnecessary Claude thinking loss; it cannot
 transfer thinking blocks between unrelated accounts.
 
+Claude server-side Thread continuations also keep the account that owns their
+previous message. They cannot move server-side state to another account. After
+confirmed quota exhaustion, replay the full conversation with `thread.type: create`
+to permit migration. An old Thread hint cannot restore a previous account after
+the durable session has migrated, including after a restart.
+
 ## Soonest weekly reset first
 
 Set `routing.strategy: soonest-reset-first` to use Claude OAuth quota nearest its
