@@ -31,8 +31,10 @@ The routing strategy chooses accounts for new sessions and permitted migrations.
 - Bindings do not expire. `session-affinity-ttl` only controls the memory cache.
   Disabling affinity retains the file; enabling it again restores saved owners.
 - Selection, retries, and WebSocket alternate-account probes all enforce the
-  saved owner. Antigravity credits fallback is disabled in durable mode because
-  it bypasses normal account selection.
+  saved owner. Terminal retry hints use only accounts eligible for that session;
+  an unrelated account's earlier reset cannot shorten the owner's wait.
+  Antigravity credits fallback is disabled in durable mode because it bypasses
+  normal account selection.
 
 Clients must reuse a stable explicit ID, such as `X-Claude-Code-Session-Id`,
 `X-Session-ID`, or a supported body identity. This also applies to token counting.
