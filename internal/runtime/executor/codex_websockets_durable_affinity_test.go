@@ -24,7 +24,12 @@ func TestCodexWebsocketEarlyRejectionPreservesDurableQuotaPolicy(t *testing.T) {
 		}{
 			{"capacity", `{"type":"error","status":429,"headers":{"Retry-After":"3600"},"error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"Codex is at capacity"}}`, false},
 			{"generic rate limit", `{"type":"error","status":429,"headers":{"Retry-After":"3600"},"error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded"}}`, false},
+			{"nested overload hint", `{"type":"error","error":{"code":"server_is_overloaded","message":"Server is overloaded","headers":{"Retry-After":"3600"}}}`, false},
+			{"nested capacity hint", `{"type":"error","error":{"code":"turn_rate_limit_exceeded","message":"Codex is at capacity","headers":{"Retry-After":"3600"}}}`, false},
+			{"string error", `{"type":"error","status":503,"error":"server busy"}`, false},
+			{"bio policy", `{"type":"response.failed","response":{"error":{"code":"bio_policy","message":"Request blocked"}}}`, false},
 			{"quota error", `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"Usage limit reached","resets_in_seconds":3600}}`, true},
+			{"nested quota hint", `{"type":"error","error":{"type":"usage_limit_reached","message":"Usage limit reached","resets_in_seconds":3600,"headers":{"Retry-After":"3600"}}}`, true},
 			{"quota terminal", `{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","status_code":429,"message":"Usage limit reached","resets_in_seconds":3600}}}`, true},
 		} {
 			t.Run(fmt.Sprintf("%s/buffering=%t", tc.name, buffering), func(t *testing.T) {
