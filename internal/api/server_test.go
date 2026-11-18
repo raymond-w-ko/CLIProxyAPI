@@ -536,8 +536,8 @@ func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *tes
 	}
 	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
 	apiResponse, _ := rawAPIResponse.([]byte)
-	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
-		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
 	}
 }
 
@@ -2144,6 +2144,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 			MaxCompletionTokens: 64000,
 			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
+		{ID: "gpt-6.2-astra", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{
 			ID:            "custom-codex-model-test",
 			Object:        "model",
@@ -2204,11 +2205,14 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	}
 
 	var gpt55 map[string]any
+	var astra map[string]any
 	var custom map[string]any
 	for _, model := range resp.Models {
 		switch slug, _ := model["slug"].(string); slug {
 		case "gpt-5.5":
 			gpt55 = model
+		case "gpt-6.2-astra":
+			astra = model
 		case "custom-codex-model-test":
 			custom = model
 		}
@@ -2226,8 +2230,18 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
-	if !ok || len(serviceTiers) != 1 {
-		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	if !ok || len(serviceTiers) != 0 {
+		t.Fatalf("expected no gpt-5.5 service tiers, got %#v", gpt55["service_tiers"])
+	}
+	if astra == nil {
+		t.Fatal("expected gpt-6.2-astra codex catalog entry")
+	}
+	astraTiers, ok := astra["service_tiers"].([]any)
+	if !ok || len(astraTiers) != 1 {
+		t.Fatalf("expected one gpt-6.2-astra service tier, got %#v", astra["service_tiers"])
+	}
+	if tier, ok := astraTiers[0].(map[string]any); !ok || tier["id"] != "priority" {
+		t.Fatalf("expected gpt-6.2-astra priority service tier, got %#v", astraTiers[0])
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")
