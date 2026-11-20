@@ -522,7 +522,9 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 		state.lastAttempt = time.Time{}
 		state.task = nil
 	} else if oldTask != nil {
-		if oldTask.ctx.Err() == nil {
+		// A stalled lookup can block duplicate work for one refresh interval.
+		// After that, a new refresh can replace it and cancel its request.
+		if oldTask.ctx.Err() == nil && now.Sub(state.lastAttempt) < antigravityCreditsHintRefreshInterval {
 			state.mu.Unlock()
 			return
 		}
@@ -550,7 +552,7 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 		}
 		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, timeout)
 	} else {
-		// Optional post-refresh work follows its lifecycle without adding a timer.
+		// Optional post-refresh work follows the caller's lifecycle.
 		refreshCtx, cancelRefresh = context.WithCancel(lifecycle)
 	}
 	task := &antigravityCreditsRefreshTask{

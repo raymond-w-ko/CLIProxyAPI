@@ -133,6 +133,9 @@ exhausted owner before a new response confirms exhaustion.
   context that has been reused for another request.
 - **Stream logging:** join the logging worker before clearing its chunk channel.
 - **Claude setup tokens:** read boolean credential metadata under its lock.
+- **Antigravity credits:** a later refresh can replace a stalled post-refresh
+  credits lookup after the refresh interval. The lookup follows caller cancellation
+  without a separate network timeout.
 - **Git storage recovery:** recognize missing pack or index files by their paths,
   without treating unrelated missing files as repository corruption.
 - **Home latency reporting:** use a separate cancelable connection for reports
