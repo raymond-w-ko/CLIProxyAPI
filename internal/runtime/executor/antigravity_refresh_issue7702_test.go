@@ -40,7 +40,7 @@ func TestIssue7702AntigravityLaterRefreshReplacesStalledCreditsLookup(t *testing
 		lifecycle, cancelLifecycle := context.WithCancel(t.Context())
 		defer cancelLifecycle()
 		ctx := context.WithValue(lifecycle, "cliproxy.roundtripper", transport)
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, ctx, auth)
 		if updated == nil {
@@ -66,6 +66,6 @@ func TestIssue7702AntigravityLaterRefreshReplacesStalledCreditsLookup(t *testing
 		if creditsRequest.Err() != context.Canceled || creditsCalls != 2 {
 			t.Fatalf("stalled request error = %v, credits calls = %d, want cancellation and 2 calls", creditsRequest.Err(), creditsCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 900)
+		issue6199AssertCreditsBalance(t, updated, 900)
 	})
 }
