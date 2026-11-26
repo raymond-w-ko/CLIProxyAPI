@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
@@ -2814,6 +2816,51 @@ func TestConvertClaudeRequestToAntigravity_ImageContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_PreservesGenerationConstraints(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-2.5-pro",
+		"max_tokens": 256,
+		"stop_sequences": ["STOP_HERE"],
+		"thinking": {"type": "adaptive"},
+		"output_config": {
+			"effort": "high",
+			"format": {
+				"type": "json_schema",
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"],
+					"additionalProperties": false
+				}
+			}
+		},
+		"messages": [{"role": "user", "content": "Return Tokyo."}]
+	}`)
+
+	output, errConvert := ConvertClaudeRequestToAntigravity("gemini-2.5-pro", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.maxOutputTokens").Int(); got != 256 {
+		t.Errorf("request.generationConfig.maxOutputTokens = %d, want 256; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.stopSequences.0").String(); got != "STOP_HERE" {
+		t.Errorf("request.generationConfig.stopSequences[0] = %q, want STOP_HERE; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Errorf("request.generationConfig.responseMimeType = %q, want application/json; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.responseSchema.properties.city.type").String(); got != "string" {
+		t.Errorf("request.generationConfig.responseSchema.properties.city.type = %q, want string; output=%s", got, output)
+	}
+	if ojson.GetBytesNoCopy(output, "request.generationConfig.responseJsonSchema").Exists() {
+		t.Errorf("request.generationConfig.responseJsonSchema should not exist; output=%s", output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Errorf("request.generationConfig.thinkingConfig.thinkingLevel = %q, want high; output=%s", got, output)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_GenerationConfig(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
@@ -3090,9 +3137,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNoContent(t *testing.T) {
 	}
 
 	// Verify the functionResponse has a valid result value
-	fr := ojson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.result")
+	fr := ojson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.output")
 	if !fr.Exists() {
-		t.Error("functionResponse.response.result should exist")
+		t.Error("functionResponse.response.output should exist")
 	}
 }
 
@@ -3179,7 +3226,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Text content should be in response.result
+	// Text content should be in response.output
 	resultText := funcResp.Get("response.result.text").String()
 	if resultText != "File content here" {
 		t.Errorf("Expected response.result.text = 'File content here', got '%s'", resultText)
@@ -3242,9 +3289,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 		t.Fatal("functionResponse should exist")
 	}
 
-	// response.result should be empty (image only)
-	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result for image-only content, got '%s'", funcResp.Get("response.result").String())
+	// response.output should be empty (image only)
+	if funcResp.Get("response.output").String() != "" {
+		t.Errorf("Expected empty response.output for image-only content, got '%s'", funcResp.Get("response.output").String())
 	}
 
 	// Image should be in functionResponse.parts[0].inlineData
@@ -3265,7 +3312,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(t *testing.T) {
 	// tool_result with array content: 2 text items + 2 images
-	// All images go into functionResponse.parts, texts into response.result array
+	// All images go into functionResponse.parts, texts into response.output array
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -3305,7 +3352,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Multiple text items => response.result is an array
+	// Multiple text items => response.output is an array
 	resultArr := funcResp.Get("response.result")
 	if !resultArr.IsArray() {
 		t.Fatalf("Expected response.result to be an array, got: %s", resultArr.Raw)
@@ -3341,7 +3388,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 }
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *testing.T) {
-	// tool_result with only images (no text) — response.result should be empty string
+	// tool_result with only images (no text) — response.output should be empty string
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -3379,9 +3426,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *t
 		t.Fatal("functionResponse should exist")
 	}
 
-	// No text => response.result should be empty string
-	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result, got '%s'", funcResp.Get("response.result").String())
+	// No text => response.output should be empty string
+	if funcResp.Get("response.output").String() != "" {
+		t.Errorf("Expected empty response.output, got '%s'", funcResp.Get("response.output").String())
 	}
 
 	// Both images in functionResponse.parts
@@ -3492,17 +3539,12 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingData(t *testing
 		t.Fatal("functionResponse should exist")
 	}
 
-	// The image is still classified as base64 image (type check passes),
-	// but data field is missing => inlineData has mimeType but no data
-	imgParts := funcResp.Get("parts").Array()
-	if len(imgParts) != 1 {
-		t.Fatalf("Expected 1 image part, got %d", len(imgParts))
+	// Incomplete base64 image (missing data) must be skipped instead of emitting malformed inlineData.
+	if funcResp.Get("parts").Exists() {
+		t.Fatalf("Expected functionResponse.parts to be omitted for image missing data, got %s", funcResp.Get("parts").Raw)
 	}
-	if imgParts[0].Get("inlineData.mimeType").String() != "image/png" {
-		t.Error("mimeType should still be set")
-	}
-	if imgParts[0].Get("inlineData.data").Exists() {
-		t.Error("data should not exist when source.data is missing")
+	if got := funcResp.Get("response.result.text").String(); got != "output" {
+		t.Fatalf("Expected response.result.text = 'output', got %q (raw=%s)", got, funcResp.Get("response").Raw)
 	}
 }
 
@@ -3542,17 +3584,15 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingMediaType(t *te
 		t.Fatal("functionResponse should exist")
 	}
 
-	// The image is still classified as base64 image,
-	// but media_type is missing => inlineData has data but no mimeType
-	imgParts := funcResp.Get("parts").Array()
-	if len(imgParts) != 1 {
-		t.Fatalf("Expected 1 image part, got %d", len(imgParts))
+	// Incomplete base64 image (missing media_type) must be skipped without emitting malformed inlineData or leaking base64 into response.
+	if funcResp.Get("parts").Exists() {
+		t.Fatalf("Expected functionResponse.parts to be omitted for image missing media_type, got %s", funcResp.Get("parts").Raw)
 	}
-	if imgParts[0].Get("inlineData.mimeType").Exists() {
-		t.Error("mimeType should not exist when media_type is missing")
+	if strings.Contains(funcResp.Get("response").Raw, "AAAA") {
+		t.Fatalf("Expected incomplete base64 image data not to leak into response, got %s", funcResp.Get("response").Raw)
 	}
-	if imgParts[0].Get("inlineData.data").String() != "AAAA" {
-		t.Error("data should still be set")
+	if got := funcResp.Get("response.result.text").String(); got != "output" {
+		t.Fatalf("Expected response.result.text = 'output', got %q (raw=%s)", got, funcResp.Get("response").Raw)
 	}
 }
 
@@ -3987,9 +4027,9 @@ func TestConvertClaudeRequestToAntigravity_FunctionResponseJSONRef(t *testing.T)
 	}`)
 
 	output, _ := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	result := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse.response.result")
+	result := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse.response.output")
 	if result.Type != ojson.String {
-		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", result.Type, result.Raw)
+		t.Fatalf("expected functionResponse.response.output to be string, got %s (raw: %s)", result.Type, result.Raw)
 	}
 	if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
 		t.Fatalf("expected result to contain ref target, got %q", result.String())
@@ -4006,7 +4046,7 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		{
 			name:         "success_without_flag",
 			fields:       `"content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "explicit_success",
@@ -4016,12 +4056,12 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		{
 			name:         "non_bool_is_error_string_treated_as_success",
 			fields:       `"is_error":"true","content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "non_bool_is_error_number_treated_as_success",
 			fields:       `"is_error":1,"content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "failed_string",
@@ -4157,4 +4197,247 @@ func TestConvertClaudeRequestToAntigravity_ToolResultDocumentExtractedToParts(t 
 			}
 		})
 	}
+}
+
+func TestConvertClaudeRequestToAntigravity_SanitizesGenerationConstraints(t *testing.T) {
+	t.Run("preserves native numeric max_tokens and filters mixed stop_sequences", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			maxTokens  string
+			wantRawMax string
+		}{
+			{name: "zero max_tokens preserved", maxTokens: "0", wantRawMax: "0"},
+			{name: "fractional max_tokens passed verbatim", maxTokens: "1024.9", wantRawMax: "1024.9"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inputJSON := []byte(`{
+					"model": "gemini-3.8-flash",
+					"max_tokens": ` + tc.maxTokens + `,
+					"stop_sequences": ["STOP", "\n", " ", "", 42, null],
+					"messages": [{"role": "user", "content": "hi"}]
+				}`)
+				output, errConvert := ConvertClaudeRequestToAntigravity("gemini-3.8-flash", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "request.generationConfig")
+				if got := genConfig.Get("maxOutputTokens").Raw; got != tc.wantRawMax {
+					t.Fatalf("maxOutputTokens raw = %q, want %s; output=%s", got, tc.wantRawMax, output)
+				}
+				stops := genConfig.Get("stopSequences").Array()
+				wantStops := []string{"STOP", "\n", " "}
+				if len(stops) != len(wantStops) {
+					t.Fatalf("stopSequences = %s, want %v", genConfig.Get("stopSequences").Raw, wantStops)
+				}
+				for i, want := range wantStops {
+					if got := stops[i].String(); got != want {
+						t.Fatalf("stopSequences[%d] = %q, want %q", i, got, want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("omits non-numeric max_tokens, empty stop_sequences, and invalid output_config.format", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			payload string
+		}{
+			{
+				name:    "null max_tokens and empty stop_sequences",
+				payload: `{"model":"claude-sonnet-5-5-high","max_tokens":null,"stop_sequences":["",false],"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name:    "string max_tokens and json_schema without schema object",
+				payload: `{"model":"claude-sonnet-5-5-high","max_tokens":"256","stop_sequences":[],"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-5-5-high", []byte(tc.payload), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "request.generationConfig")
+				for _, key := range []string{"maxOutputTokens", "stopSequences", "responseMimeType", "responseSchema", "responseJsonSchema"} {
+					if genConfig.Get(key).Exists() {
+						t.Fatalf("request.generationConfig.%s should be omitted, got %s; output=%s", key, genConfig.Get(key).Raw, output)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestConvertClaudeRequestToAntigravity_SkipsEmptyPartsAndMalformedInlineData(t *testing.T) {
+	t.Run("skips empty string message content without emitting empty part objects", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"messages": [
+				{"role": "user", "content": ""},
+				{"role": "assistant", "content": ""},
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+		}
+
+		contents := ojson.GetBytesNoCopy(output, "request.contents").Array()
+		if len(contents) != 1 {
+			t.Fatalf("expected 1 non-empty content turn, got %d: %s", len(contents), ojson.GetBytesNoCopy(output, "request.contents").Raw)
+		}
+		parts := contents[0].Get("parts").Array()
+		if len(parts) != 1 || parts[0].Get("text").String() != "hello" {
+			t.Fatalf("unexpected parts = %s", contents[0].Get("parts").Raw)
+		}
+	})
+
+	t.Run("skips empty array-form system text blocks", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"system": [
+				{"type": "text", "text": ""},
+				{"type": "text", "text": "Keep this system prompt"}
+			],
+			"messages": [
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+		}
+
+		parts := ojson.GetBytesNoCopy(output, "request.systemInstruction.parts").Array()
+		if len(parts) != 1 || parts[0].Get("text").String() != "Keep this system prompt" {
+			t.Fatalf("unexpected systemInstruction.parts = %s", ojson.GetBytesNoCopy(output, "request.systemInstruction.parts").Raw)
+		}
+
+		emptyOnlyInput := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"system": [
+				{"type": "text", "text": ""}
+			],
+			"messages": [
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+		emptyOnlyOutput, errEmptyOnly := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", emptyOnlyInput, false)
+		if errEmptyOnly != nil {
+			t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errEmptyOnly)
+		}
+		if ojson.GetBytesNoCopy(emptyOnlyOutput, "request.systemInstruction").Exists() {
+			t.Fatalf("expected request.systemInstruction to be omitted, got %s", ojson.GetBytesNoCopy(emptyOnlyOutput, "request.systemInstruction").Raw)
+		}
+	})
+
+	t.Run("omits malformed base64 images in tool_result object and array content", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			content string
+		}{
+			{name: "array empty source", content: `[{"type":"image","source":{"type":"base64"}}]`},
+			{name: "object empty source", content: `{"type":"image","source":{"type":"base64"}}`},
+			{name: "object missing data", content: `{"type":"image","source":{"type":"base64","media_type":"image/png"}}`},
+			{name: "object missing media_type", content: `{"type":"image","source":{"type":"base64","data":"AAAA"}}`},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				inputJSON := []byte(fmt.Sprintf(`{
+					"model": "claude-sonnet-4-6",
+					"messages": [
+						{"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "read_img", "input": {}}]},
+						{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": %s}]}
+					]
+				}`, tc.content))
+
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				fr := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse")
+				if !fr.Exists() {
+					t.Fatalf("functionResponse missing: %s", output)
+				}
+				if fr.Get("parts").Exists() {
+					t.Fatalf("expected malformed base64 image not to emit functionResponse.parts, got %s", fr.Get("parts").Raw)
+				}
+				if strings.Contains(fr.Get("response").Raw, "AAAA") {
+					t.Fatalf("expected malformed base64 image data not to leak into response, got %s", fr.Get("response").Raw)
+				}
+			})
+		}
+	})
+
+	t.Run("drops incomplete base64 message images and refuses emptied user turns", func(t *testing.T) {
+		incompleteSources := []struct {
+			name   string
+			source string
+		}{
+			{name: "empty base64 source", source: `{"type":"base64"}`},
+			{name: "missing data", source: `{"type":"base64","media_type":"image/png"}`},
+			{name: "missing media_type", source: `{"type":"base64","data":"AAAA"}`},
+		}
+
+		for _, tc := range incompleteSources {
+			t.Run(tc.name+" alone in user turn", func(t *testing.T) {
+				inputJSON := []byte(fmt.Sprintf(`{
+					"model": "claude-sonnet-4-6",
+					"messages": [
+						{"role": "user", "content": [{"type": "image", "source": %s}]}
+					]
+				}`, tc.source))
+
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+				var unsupported *translatorcommon.UnsupportedPartError
+				if !errors.As(errConvert, &unsupported) || unsupported.Type != "image" || unsupported.StatusCode() != 400 {
+					t.Fatalf("err = %v, want unsupported content part: image (400); output = %s", errConvert, output)
+				}
+				if strings.Contains(string(output), "inlineData") {
+					t.Fatalf("expected no inlineData in output, got %s", output)
+				}
+			})
+
+			t.Run(tc.name+" beside text in user turn", func(t *testing.T) {
+				inputJSON := []byte(fmt.Sprintf(`{
+					"model": "claude-sonnet-4-6",
+					"messages": [
+						{"role": "user", "content": [{"type": "text", "text": "keep me"}, {"type": "image", "source": %s}]}
+					]
+				}`, tc.source))
+
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				parts := ojson.GetBytesNoCopy(output, "request.contents.0.parts").Array()
+				if len(parts) != 1 || parts[0].Get("text").String() != "keep me" {
+					t.Fatalf("expected only text part to remain, got %s", ojson.GetBytesNoCopy(output, "request.contents.0.parts").Raw)
+				}
+			})
+
+			t.Run(tc.name+" in assistant turn", func(t *testing.T) {
+				inputJSON := []byte(fmt.Sprintf(`{
+					"model": "claude-sonnet-4-6",
+					"messages": [
+						{"role": "user", "content": "hi"},
+						{"role": "assistant", "content": [{"type": "text", "text": "reply"}, {"type": "image", "source": %s}]}
+					]
+				}`, tc.source))
+
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				parts := ojson.GetBytesNoCopy(output, "request.contents.1.parts").Array()
+				if len(parts) != 1 || parts[0].Get("text").String() != "reply" {
+					t.Fatalf("expected only assistant text part to remain, got %s", ojson.GetBytesNoCopy(output, "request.contents.1.parts").Raw)
+				}
+			})
+		}
+	})
 }

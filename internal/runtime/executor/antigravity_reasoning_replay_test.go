@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -2257,6 +2259,174 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(
 	}
 }
 
+func TestPrepareAntigravityGeminiReasoningReplayDegradesAndCommitsNextTurn(t *testing.T) {
+	modes := []struct {
+		name  string
+		useKV bool
+	}{
+		{name: "memory", useKV: false},
+		{name: "kv", useKV: true},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			homekv.ClearCurrent()
+			internalcache.ClearAntigravityReasoningReplayCache()
+			if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+				t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+			}
+			var dbPath string
+			if mode.useKV {
+				// Allocate TempDir before registering ShutdownLocal cleanup so LIFO
+				// order closes bbolt before removing the directory (required on Windows).
+				dbPath = filepath.Join(t.TempDir(), "issue7997-kv.db")
+			}
+			t.Cleanup(func() {
+				internalcache.ClearAntigravityReasoningReplayCache()
+				homekv.ClearCurrent()
+				if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+					t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+				}
+			})
+			if mode.useKV {
+				if errCfg := kvstore.ConfigureLocal(true, dbPath); errCfg != nil {
+					t.Fatalf("kvstore.ConfigureLocal() error = %v", errCfg)
+				}
+			}
+
+			const model = "gemini-3.6-flash-high"
+			const args = `{"file_path":"/tmp/a"}`
+			payload := []byte(`{"sessionId":"sess-pairing-break-commit-` + mode.name + `","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+			payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+			if err := internalsignature.ValidateGeminiFunctionCallPairing(payload); err != nil {
+				t.Fatalf("original payload pairing invalid: %v", err)
+			}
+
+			badItem := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"call_id":"call_native_1","name":"Read","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+			sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+			if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{badItem}) {
+				t.Fatal("failed to cache bad replay item")
+			}
+
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FromString("claude"),
+				OriginalRequest: []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`),
+			}
+			out, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+				context.Background(),
+				model,
+				cliproxyexecutor.Request{Model: model, Payload: payload},
+				opts,
+				payload,
+			)
+			if errPrepare != nil {
+				t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v, want graceful degradation", errPrepare)
+			}
+			if !bytes.Equal(out, payload) {
+				t.Fatalf("out = %s, want original payload %s", out, payload)
+			}
+			if !scope.valid() {
+				t.Fatalf("returned scope is invalid: %+v", scope)
+			}
+
+			_, foundAfterDegrade, errPeekAfterDegrade := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+			if errPeekAfterDegrade != nil || foundAfterDegrade {
+				t.Fatalf("cache after pairing degradation = (found=%v, err=%v), want (false, nil)", foundAfterDegrade, errPeekAfterDegrade)
+			}
+
+			const newSig = "FreshSignatureAfterPairingDegradation1234567890"
+			responseBody := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"checking next step"},{"thoughtSignature":"` + newSig + `","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},"finishReason":"STOP"}]}}`)
+			cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, out, responseBody)
+
+			committedItems, foundAfterCommit, errPeekAfterCommit := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+			if errPeekAfterCommit != nil || !foundAfterCommit || len(committedItems) == 0 {
+				t.Fatalf("cache after degraded turn commit = (len=%d, found=%v, err=%v), want committed replay items", len(committedItems), foundAfterCommit, errPeekAfterCommit)
+			}
+			hasNewSig := false
+			for _, item := range committedItems {
+				if ojson.GetBytesNoCopy(item, "thoughtSignature").String() == newSig {
+					hasNewSig = true
+					break
+				}
+			}
+			if !hasNewSig {
+				t.Fatalf("committed items missing %q: %q", newSig, committedItems)
+			}
+
+			nextTurnPayload := []byte(`{"sessionId":"sess-pairing-break-commit-` + mode.name + `","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"Grep","response":{"result":"match"}}}]}]}}`)
+			nextTurnPayload = normalizeAntigravityGeminiFunctionResponseRoles(nextTurnPayload)
+			replayedNext, _, errNext := prepareAntigravityGeminiReasoningReplayPayload(
+				context.Background(),
+				model,
+				cliproxyexecutor.Request{Model: model, Payload: nextTurnPayload},
+				opts,
+				nextTurnPayload,
+			)
+			if errNext != nil {
+				t.Fatalf("next turn prepare error: %v", errNext)
+			}
+			if gotSig := ojson.GetBytesNoCopy(replayedNext, "request.contents.2.parts.0.thoughtSignature").String(); gotSig != newSig {
+				t.Fatalf("next turn replayed signature = %q, want %q", gotSig, newSig)
+			}
+		})
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradedCommitDoesNotClobberConcurrentWrite(t *testing.T) {
+	homekv.ClearCurrent()
+	internalcache.ClearAntigravityReasoningReplayCache()
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+	}
+	t.Cleanup(func() {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		homekv.ClearCurrent()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+		}
+	})
+
+	const model = "gemini-3.6-flash-high"
+	const args = `{"file_path":"/tmp/a"}`
+	payload := []byte(`{"sessionId":"sess-pairing-break-concurrent","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+
+	badItem := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"call_id":"call_native_1","name":"Read","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{badItem}) {
+		t.Fatal("failed to cache bad replay item")
+	}
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`),
+	}
+	out, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: payload},
+		opts,
+		payload,
+	)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v", errPrepare)
+	}
+
+	const concurrentSig = "ConcurrentTurnSignatureMustSurvive1234567890"
+	concurrentItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"` + concurrentSig + `"}`)
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{concurrentItem}) {
+		t.Fatal("failed to cache concurrent replay item")
+	}
+
+	responseBody := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"DegradedStaleSignatureShouldDrop1234567890","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},"finishReason":"STOP"}]}}`)
+	cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, out, responseBody)
+
+	items, found, errPeek := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+	if errPeek != nil || !found || len(items) != 1 || ojson.GetBytesNoCopy(items[0], "thoughtSignature").String() != concurrentSig {
+		t.Fatalf("concurrent replay item was clobbered: items=%q found=%v err=%v", items, found, errPeek)
+	}
+}
+
 func TestAntigravityStreamChunksHaveTerminalCommitEvent(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -2936,6 +3106,140 @@ func TestAntigravityReasoningReplayScopeReviewFindingsRegressions(t *testing.T) 
 		scopeChildB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqChildB, optsChildB, childForkB)
 		if !scopeChildA.valid() || !scopeChildB.valid() || scopeChildA.sessionKey == scopeChildB.sessionKey {
 			t.Fatalf("identified child forks should stay valid and isolated: A=%+v B=%+v", scopeChildA, scopeChildB)
+		}
+	})
+}
+
+func TestAntigravityReasoningReplay_PrunesEmptyExtraContentShell(t *testing.T) {
+	t.Run("sequential_remove_other_parts_prunes_empty_and_preserves_siblings", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"thought":true,"text":"plan","thoughtSignature":"sig-dup"},{"text":"dup-empty","extra_content":{"google":{"thought_signature":"sig-dup"}}},{"text":"dup-google-sibling","extra_content":{"google":{"thought_signature":"sig-dup","keep":"yes"}}},{"text":"dup-extra-sibling","extra_content":{"google":{"thought_signature":"sig-dup"},"keep":"yes"}}]}]}}`)
+		out := antigravityRemoveThoughtSignatureFromOtherParts(payload, 0, "sig-dup", "request.contents.0.parts.0")
+
+		p1 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.1")
+		if p1.Get("extra_content").Exists() {
+			t.Fatalf("parts.1 left empty extra_content shell: %s", p1.Raw)
+		}
+		p2 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.2")
+		if p2.Get("extra_content.google.thought_signature").Exists() || p2.Get("extra_content.google.keep").String() != "yes" {
+			t.Fatalf("parts.2 should keep non-empty extra_content.google sibling: %s", p2.Raw)
+		}
+		p3 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.3")
+		if p3.Get("extra_content.google").Exists() || p3.Get("extra_content.keep").String() != "yes" {
+			t.Fatalf("parts.3 should prune empty google but keep extra_content sibling: %s", p3.Raw)
+		}
+	})
+
+	t.Run("batch_remove_other_parts_prunes_empty_extra_content", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"thought":true,"text":"plan"},{"text":"dup","extra_content":{"google":{"thought_signature":"sig-dup"}}}]}]}}`)
+		batch := newAntigravityReplayBatch(newAntigravityReplayRequestIndex(payload))
+		keep := antigravityReplayPartKey{contentIndex: 0, partIndex: 0}
+		if !batch.removeThoughtSignatureFromOtherParts(0, "sig-dup", keep) {
+			t.Fatal("expected removeThoughtSignatureFromOtherParts to report change")
+		}
+		out, ok := batch.build(payload)
+		if !ok {
+			t.Fatal("expected batch.build to succeed")
+		}
+		p1 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.1")
+		if p1.Get("extra_content").Exists() {
+			t.Fatalf("batch parts.1 left empty extra_content shell: %s", p1.Raw)
+		}
+	})
+
+	t.Run("batch_apply_function_call_signature_prunes_empty_extra_content", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{"q":"go"}},"extra_content":{"google":{"thought_signature":"sig-fc"}}},{"text":"dup","extra_content":{"google":{"thought_signature":"sig-fc"}}}]}]}}`)
+		item := ojson.Parse(`{"type":"function_call_part","call_id":"call-1","name":"lookup","args":{"q":"go"},"thoughtSignature":"sig-fc"}`)
+		batch := newAntigravityReplayBatch(newAntigravityReplayRequestIndex(payload))
+		if !batch.applyFunctionCallSignature(item, nil) {
+			t.Fatal("expected batch.applyFunctionCallSignature to succeed")
+		}
+		out, ok := batch.build(payload)
+		if !ok {
+			t.Fatal("expected batch.build to succeed")
+		}
+		p0 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.0")
+		if p0.Get("thoughtSignature").String() != "sig-fc" || p0.Get("extra_content").Exists() {
+			t.Fatalf("batch parts.0 expected canonical thoughtSignature without empty extra_content: %s", p0.Raw)
+		}
+		p1 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.1")
+		if p1.Get("extra_content").Exists() {
+			t.Fatalf("batch parts.1 left empty extra_content shell: %s", p1.Raw)
+		}
+	})
+
+	t.Run("sequential_restore_function_call_prunes_empty_extra_content", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{"q":"go"}},"extra_content":{"google":{"thought_signature":"sig-fc"}}},{"text":"dup","extra_content":{"google":{"thought_signature":"sig-fc"}}}]}]}}`)
+		item := ojson.Parse(`{"type":"function_call_part","call_id":"call-1","name":"lookup","args":{"q":"go"},"thoughtSignature":"sig-fc"}`)
+		out, changed := restoreAntigravityNativeFunctionCallReplay(payload, 0, 0, item, false, true)
+		if !changed {
+			t.Fatal("expected restoreAntigravityNativeFunctionCallReplay to report change")
+		}
+		p0 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.0")
+		if p0.Get("thoughtSignature").String() != "sig-fc" || p0.Get("extra_content").Exists() {
+			t.Fatalf("sequential parts.0 expected canonical thoughtSignature without empty extra_content: %s", p0.Raw)
+		}
+		p1 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.1")
+		if p1.Get("extra_content").Exists() {
+			t.Fatalf("sequential parts.1 left empty extra_content shell: %s", p1.Raw)
+		}
+	})
+
+	t.Run("merge_function_call_fallback_prunes_empty_extra_content", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"text":"slot"},{"text":"dup","extra_content":{"google":{"thought_signature":"sig-merge"}}}]}]}}`)
+		item := ojson.Parse(`{"type":"function_call_part","call_id":"call-2","name":"lookup","args":{"q":"go"},"thoughtSignature":"sig-merge","contentIndex":0,"partIndex":0}`)
+		index := newAntigravityReplayRequestIndex(payload)
+		out, changed := mergeAntigravityFunctionCallPartReplayWithSchemas(index, payload, item, nil)
+		if !changed {
+			t.Fatal("expected mergeAntigravityFunctionCallPartReplayWithSchemas to report change")
+		}
+		p1 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.1")
+		if p1.Get("extra_content").Exists() {
+			t.Fatalf("merge fallback parts.1 left empty extra_content shell: %s", p1.Raw)
+		}
+	})
+
+	t.Run("duplicate_google_and_extra_content_wrappers_pruned_and_siblings_preserved", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"thought":true,"text":"plan","thoughtSignature":"sig-dup"},{"text":"dup-google-empty","extra_content":{"google":{"thought_signature":"sig-dup"},"google":{}}},{"text":"dup-google-two-sigs","extra_content":{"google":{"thought_signature":"sig-dup"},"google":{"thought_signature":"sig-dup"}}},{"text":"dup-google-keep","extra_content":{"google":{"keep":"yes"},"google":{"thought_signature":"sig-dup"}}},{"text":"dup-extra-two-sigs","extra_content":{"google":{"thought_signature":"sig-dup"}},"extra_content":{"google":{"thought_signature":"sig-dup"}}},{"text":"dup-extra-keep","extra_content":{"google":{"thought_signature":"sig-dup"},"keep":"yes"},"extra_content":{"google":{"thought_signature":"sig-dup"}}}]}]}}`)
+		out := antigravityRemoveThoughtSignatureFromOtherParts(payload, 0, "sig-dup", "request.contents.0.parts.0")
+
+		for _, idx := range []int{1, 2, 4} {
+			p := ojson.GetBytesNoCopy(out, fmt.Sprintf("request.contents.0.parts.%d", idx))
+			if p.Get("extra_content").Exists() || strings.Contains(p.Raw, "thought_signature") {
+				t.Fatalf("sequential parts.%d left extra_content or thought_signature: %s", idx, p.Raw)
+			}
+		}
+		p3 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.3")
+		if strings.Contains(p3.Raw, "thought_signature") || p3.Get("extra_content.google.keep").String() != "yes" || strings.Count(p3.Raw, `"google"`) != 1 {
+			t.Fatalf("sequential parts.3 should strip duplicate google sig and keep non-empty google sibling: %s", p3.Raw)
+		}
+		p5 := ojson.GetBytesNoCopy(out, "request.contents.0.parts.5")
+		if strings.Contains(p5.Raw, "thought_signature") || strings.Contains(p5.Raw, `"google"`) || p5.Get("extra_content.keep").String() != "yes" || strings.Count(p5.Raw, `"extra_content"`) != 1 {
+			t.Fatalf("sequential parts.5 should prune empty duplicate extra_content and keep sibling: %s", p5.Raw)
+		}
+
+		// Also verify the batch single-part path on duplicate wrappers.
+		batch := newAntigravityReplayBatch(newAntigravityReplayRequestIndex(payload))
+		keep := antigravityReplayPartKey{contentIndex: 0, partIndex: 0}
+		if !batch.removeThoughtSignatureFromOtherParts(0, "sig-dup", keep) {
+			t.Fatal("expected batch.removeThoughtSignatureFromOtherParts to report change")
+		}
+		batchOut, ok := batch.build(payload)
+		if !ok {
+			t.Fatal("expected batch.build to succeed")
+		}
+		for _, idx := range []int{1, 2, 4} {
+			p := ojson.GetBytesNoCopy(batchOut, fmt.Sprintf("request.contents.0.parts.%d", idx))
+			if p.Get("extra_content").Exists() || strings.Contains(p.Raw, "thought_signature") {
+				t.Fatalf("batch parts.%d left extra_content or thought_signature: %s", idx, p.Raw)
+			}
+		}
+		bp3 := ojson.GetBytesNoCopy(batchOut, "request.contents.0.parts.3")
+		if strings.Contains(bp3.Raw, "thought_signature") || bp3.Get("extra_content.google.keep").String() != "yes" || strings.Count(bp3.Raw, `"google"`) != 1 {
+			t.Fatalf("batch parts.3 should strip duplicate google sig and keep non-empty google sibling: %s", bp3.Raw)
+		}
+		bp5 := ojson.GetBytesNoCopy(batchOut, "request.contents.0.parts.5")
+		if strings.Contains(bp5.Raw, "thought_signature") || strings.Contains(bp5.Raw, `"google"`) || bp5.Get("extra_content.keep").String() != "yes" || strings.Count(bp5.Raw, `"extra_content"`) != 1 {
+			t.Fatalf("batch parts.5 should prune empty duplicate extra_content and keep sibling: %s", bp5.Raw)
 		}
 	})
 }

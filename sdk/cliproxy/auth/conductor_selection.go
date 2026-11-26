@@ -60,7 +60,15 @@ func pluginSchedulerNeedsAllPriorities(scheduler PluginScheduler) bool {
 		return true
 	}
 	if pool, ok := scheduler.(pluginSchedulerPriorityPool); ok && pool != nil {
-		return pool.SchedulerWantsAllPriorityCandidates()
+		if pool.SchedulerWantsAllPriorityCandidates() {
+			return true
+		}
+		// Hosts that narrow per-scheduler priority tiers internally can receive the full
+		// available pool while an active scheduler is installed, so hot-reloading a single
+		// non-across scheduler into an across-priorities replacement still sees lower tiers.
+		if state, okState := scheduler.(pluginSchedulerState); okState && state != nil && state.HasScheduler() {
+			return true
+		}
 	}
 	return false
 }
@@ -1055,7 +1063,7 @@ func selectorContextForAvailableAuths(ctx context.Context, selector Selector, ro
 	return context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
 }
 
-func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Context, selector Selector, affinityCandidates []*Auth, routeModel string, now time.Time, clientHeaders ...http.Header) map[string]struct{} {
+func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Context, selector Selector, affinityCandidates []*Auth, routeModel string, opts cliproxyexecutor.Options, now time.Time) map[string]struct{} {
 	affinity, ok := selector.(*SessionAffinitySelector)
 	if !ok || affinity == nil || (!affinity.rebindOnQuotaOnly && !affinity.rebindOnNever) || len(affinityCandidates) == 0 {
 		return nil
@@ -1063,13 +1071,14 @@ func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Conte
 	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted {
 		affinityCandidates = positiveWeightAuths(affinityCandidates)
 	}
+	cfg := m.runtimeConfigSnapshot()
 	var authIDs map[string]struct{}
 	for _, candidate := range affinityCandidates {
 		if candidate == nil || candidate.ID == "" {
 			continue
 		}
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
-		if !isAuthBlockedByQuotaOrAuthForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...) {
+		if !isAuthBlockedByQuotaOrAuthForAntigravityRequest(ctx, candidate, routeModel, checkModel, opts, cfg, now, opts.Headers) {
 			if authIDs == nil {
 				authIDs = make(map[string]struct{}, len(affinityCandidates))
 			}
@@ -2530,7 +2539,7 @@ func (m *Manager) pickNextLegacyUnbound(ctx context.Context, provider, model str
 		}
 		accountingAuths = fullAvailable
 	}
-	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
+	affinitySnapshots := cloneAuthSlice(affinityCandidates)
 	m.mu.RUnlock()
 
 	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
@@ -2565,9 +2574,10 @@ func (m *Manager) pickNextLegacyUnbound(ctx context.Context, provider, model str
 			} else {
 				accountingAuths = nil
 			}
-			transientAuthIDs = m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
+			affinitySnapshots = cloneAuthSlice(affinityCandidates)
 			m.mu.RUnlock()
 		}
+		transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinitySnapshots, model, opts, now)
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = m.soonestResetContext(selectorCtx, selector, model, selectorAuths)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
@@ -3044,7 +3054,7 @@ func (m *Manager) pickNextMixedLegacyUnbound(ctx context.Context, providers []st
 		}
 		accountingAuths = fullAvailable
 	}
-	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
+	affinitySnapshots := cloneAuthSlice(affinityCandidates)
 	m.mu.RUnlock()
 
 	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
@@ -3079,9 +3089,10 @@ func (m *Manager) pickNextMixedLegacyUnbound(ctx context.Context, providers []st
 			} else {
 				accountingAuths = nil
 			}
-			transientAuthIDs = m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
+			affinitySnapshots = cloneAuthSlice(affinityCandidates)
 			m.mu.RUnlock()
 		}
+		transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinitySnapshots, model, opts, now)
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = m.soonestResetContext(selectorCtx, selector, model, selectorAuths)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)

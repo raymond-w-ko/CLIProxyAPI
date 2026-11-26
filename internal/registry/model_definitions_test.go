@@ -16,7 +16,7 @@ func TestCodexConfigurationUpdateCapability(t *testing.T) {
 		models  func() []*ModelInfo
 		capable []string
 	}{
-		{name: "free", models: GetCodexFreeModels, capable: []string{"gpt-6-luna", "gpt-6.1-terra"}},
+		{name: "free", models: GetCodexFreeModels, capable: []string{"gpt-6-luna"}},
 		{name: "team", models: GetCodexTeamModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"}},
 		{name: "plus", models: GetCodexPlusModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"}},
 		{name: "pro", models: GetCodexProModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"}},

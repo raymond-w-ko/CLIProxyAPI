@@ -146,18 +146,27 @@ func StoreAntigravityModelCatalog(ctx context.Context, auth *Auth, models map[st
 	return true
 }
 
-// AntigravityModelEnumSnapshotMissing reports a confirmed local KV miss. It is
-// used when a persisted model catalog would otherwise suppress discovery.
+// AntigravityModelEnumSnapshotMissing reports a confirmed local snapshot miss.
+// It is used when a persisted model catalog would otherwise suppress discovery.
 func AntigravityModelEnumSnapshotMissing(ctx context.Context, auth *Auth) (bool, error) {
 	if !validAntigravityModelEnumAuth(auth) || home.Current() != nil || auth.Attributes[AntigravityModelEnumHomeScopeAttribute] != "" {
 		return false, nil
 	}
+	key := antigravityModelEnumLocalKey + kvstore.HashKeyPart(auth.ID)
+	scope := antigravityLocalModelEnumScope(auth)
 	client, active, errClient := kvstore.CurrentKVClient()
-	if !active || errClient != nil {
+	if errClient != nil {
 		return false, errClient
 	}
-	snapshot, errRead := readAntigravityModelEnumDoc(ctx, client, antigravityModelEnumLocalKey+kvstore.HashKeyPart(auth.ID))
-	return errRead == nil && !antigravityModelEnumDocMatches(snapshot, antigravityLocalModelEnumScope(auth), auth.antigravityEnumRegistration), errRead
+	if !active {
+		entry, found := antigravityModelEnums.Get(key)
+		if !found {
+			return true, nil
+		}
+		return !entry.Load().matches(scope, auth.antigravityEnumRegistration), nil
+	}
+	snapshot, errRead := readAntigravityModelEnumDoc(ctx, client, key)
+	return errRead == nil && !antigravityModelEnumDocMatches(snapshot, scope, auth.antigravityEnumRegistration), errRead
 }
 
 // LookupAntigravityModelEnum returns a previously discovered enum for the exact
@@ -264,6 +273,107 @@ func SelectAntigravityModel(ctx context.Context, auth *Auth, upstreamModelID, le
 		}
 	}
 	return selection
+}
+
+func antigravityModelHasThinkingGroup(ctx context.Context, auth *Auth, upstreamModelID string) bool {
+	if !validAntigravityModelEnumAuth(auth) || upstreamModelID == "" || len(upstreamModelID) > antigravityModelEnumMaxBytes {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var key, scope, registration string
+	id := kvstore.HashKeyPart(auth.ID)
+	homeScope := auth.Attributes[AntigravityModelEnumHomeScopeAttribute]
+	if homeScope != "" || home.Current() != nil {
+		if len(homeScope) != 64 {
+			return false
+		}
+		key, scope = antigravityModelEnumHomeKey+id+":"+homeScope, homeScope
+	} else {
+		key, scope = antigravityModelEnumLocalKey+id, antigravityLocalModelEnumScope(auth)
+		registration = auth.antigravityEnumRegistration
+	}
+	client, active, errClient := kvstore.CurrentKVClient()
+	if active {
+		if errClient != nil {
+			return false
+		}
+		snapshot, errRead := readAntigravityModelEnumDoc(ctx, client, key)
+		if errRead != nil || !antigravityModelEnumDocMatches(snapshot, scope, registration) {
+			return false
+		}
+		groups := snapshot.Get("thinkingGroups")
+		if !groups.IsObject() {
+			return false
+		}
+		return antigravityModelMatchesThinkingGroup(upstreamModelID, func(group string) (int, func(level string) int, bool) {
+			levels := groups.Get(ojson.Escape(group))
+			if !levels.IsObject() {
+				return 0, nil, false
+			}
+			count := 0
+			levels.ForEach(func(_, value ojson.Result) bool {
+				if value.Type == ojson.Number {
+					count++
+				}
+				return true
+			})
+			return count, func(level string) int {
+				value := levels.Get(ojson.Escape(level))
+				if value.Type == ojson.Number {
+					if limit, errLimit := strconv.Atoi(value.Raw); errLimit == nil && limit >= 0 {
+						return limit
+					}
+				}
+				return -1
+			}, true
+		})
+	}
+	if homeScope != "" {
+		return false
+	}
+	entry, found := antigravityModelEnums.Get(key)
+	if !found {
+		return false
+	}
+	snapshot := entry.Load()
+	if !snapshot.matches(scope, registration) || len(snapshot.ThinkingGroups) == 0 {
+		return false
+	}
+	return antigravityModelMatchesThinkingGroup(upstreamModelID, func(group string) (int, func(level string) int, bool) {
+		levels, ok := snapshot.ThinkingGroups[group]
+		if !ok {
+			return 0, nil, false
+		}
+		return len(levels), func(level string) int {
+			if limit, listed := levels[level]; listed && limit >= 0 {
+				return limit
+			}
+			return -1
+		}, true
+	})
+}
+
+func antigravityModelMatchesThinkingGroup(upstreamModelID string, lookupGroup func(group string) (count int, limitFor func(level string) int, ok bool)) bool {
+	if count, _, ok := lookupGroup(upstreamModelID); ok && count > 0 {
+		return true
+	}
+	for end := len(upstreamModelID); end > 0; {
+		end = strings.LastIndexByte(upstreamModelID[:end], '-')
+		if end <= 0 {
+			break
+		}
+		group := upstreamModelID[:end]
+		suffix := upstreamModelID[end+1:]
+		if !antigravitycatalog.ValidThinkingSuffix(suffix) {
+			continue
+		}
+		if count, limitFor, ok := lookupGroup(group); ok && limitFor(suffix) >= 0 {
+			return count > 1
+		}
+	}
+	return false
 }
 
 func validAntigravityModelEnum(value string) bool {
