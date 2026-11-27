@@ -1450,6 +1450,11 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		Candidates: schedulerAuthCandidates(candidates),
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
+	if ctx != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return nil, true, nil, errCtx
+		}
+	}
 	if errPick != nil {
 		return nil, true, nil, errPick
 	}

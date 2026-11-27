@@ -189,6 +189,53 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, errMutation
 	}
 	defer releaseMutation()
+	return m.registerLocked(ctx, auth, releaseMutation)
+}
+
+// RegisterFileSnapshotIfAbsent registers an unversioned file-synthesized auth
+// snapshot only if no runtime auth with the same ID exists and the backing file
+// on disk still matches the snapshot, all verified under the per-auth mutation
+// lock. When an auth already exists under the lock, it returns a clone of that
+// existing auth with exists=true without overwriting it or bumping its
+// registration epoch. When the auth is still absent but the snapshot no longer
+// matches disk, it returns (nil, false, nil).
+func (m *Manager) RegisterFileSnapshotIfAbsent(ctx context.Context, auth *Auth) (registered *Auth, exists bool, err error) {
+	if m == nil || auth == nil {
+		return nil, false, nil
+	}
+	NormalizeCredentialMetadata(auth.Metadata)
+	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+		return nil, false, fmt.Errorf("register auth: %w", errWeight)
+	}
+	if auth.ID == "" {
+		auth.ID = uuid.NewString()
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+
+	m.mu.RLock()
+	existing, ok := m.auths[auth.ID]
+	var existingClone *Auth
+	if ok && existing != nil {
+		existingClone = existing.Clone()
+	}
+	m.mu.RUnlock()
+	if existingClone != nil {
+		return existingClone, true, nil
+	}
+	// Validate file snapshot freshness under the per-auth mutation gate
+	// without holding m.mu across filesystem I/O.
+	if auth.HasFileSnapshot() && !auth.FileSnapshotMatchesDisk() {
+		return nil, false, nil
+	}
+	registered, err = m.registerLocked(ctx, auth, releaseMutation)
+	return registered, false, err
+}
+
+func (m *Manager) registerLocked(ctx context.Context, auth *Auth, releaseMutation func()) (*Auth, error) {
 	now := time.Now()
 	if auth.Generation == 0 {
 		auth.Generation = 1
@@ -378,12 +425,17 @@ func (m *Manager) updateInternalWithStatus(ctx context.Context, base, auth *Auth
 	if auth == nil || auth.ID == "" {
 		return nil, false, false, nil
 	}
+	var onPersistDone func()
+	ctx, onPersistDone = detachAutoRefreshPersistDone(ctx)
 	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
 	if errMutation != nil {
 		return nil, false, false, errMutation
 	}
 	committedAuth, didCommit, baseSuperseded, persistCooldown, err := m.updateInternalLockedWithOptions(ctx, base, auth, mode, strictPrepareVersion)
 	releaseMutation()
+	if mode == updateModeRefresh && onPersistDone != nil {
+		onPersistDone()
+	}
 	if err == nil && didCommit && committedAuth != nil {
 		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
 	}
@@ -718,6 +770,9 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 				auth.Status = existing.Status
 			}
 		}
+		if isFileSnapshot && reconcileOrphanedAuthUnavailable(auth, now) {
+			cooldownStateChanged = true
+		}
 	} else {
 		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 		applyPreservedRenewalState(existing, auth, mode, now)
@@ -733,6 +788,11 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 				} else {
 					auth.NextRefreshAfter = time.Time{}
 				}
+			}
+		}
+		if (existing.Disabled || existing.Status == StatusDisabled) && !auth.Disabled && auth.Status != StatusDisabled {
+			if reconcileReenabledAuthState(auth, existing, now) {
+				cooldownStateChanged = true
 			}
 		}
 	}
@@ -816,6 +876,15 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			}
 		}
 	}
+	if (existingBeforeSave.Disabled || existingBeforeSave.Status == StatusDisabled) && !auth.Disabled && auth.Status != StatusDisabled {
+		if reconcileReenabledAuthState(auth, existing, now) {
+			cooldownStateChanged = true
+		}
+	} else if isFileSnapshot && !auth.Disabled && auth.Status != StatusDisabled {
+		if reconcileOrphanedAuthUnavailable(auth, now) {
+			cooldownStateChanged = true
+		}
+	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
 	}
@@ -840,6 +909,142 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 		m.forgetWeightedAuthUpTo(authClone.ID, forgetEpoch, forgetGen)
 	}
 	return auth.Clone(), true, baseSuperseded, cooldownStateChanged, nil
+}
+
+// reconcileReenabledAuthState reconciles availability and status when a
+// credential transitions from disabled back to enabled. It clears disabled-era
+// unavailability and disabled model states while keeping unresolved sign-in or
+// rejected-token failures explicitly marked as StatusError.
+func reconcileReenabledAuthState(auth, existing *Auth, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	changed := false
+	for _, state := range auth.ModelStates {
+		if state == nil || state.Status != StatusDisabled {
+			continue
+		}
+		resetModelState(state, now)
+		changed = true
+	}
+	requiresSignInBlocked := auth.RequiresSignIn && !auth.HasValidAccessToken(now)
+	rejectedAccessBlocked := hasRejectedActiveAccessToken(auth)
+	if requiresSignInBlocked || rejectedAccessBlocked || hasUnauthorizedAuthFailure(auth) {
+		auth.Unavailable = true
+		auth.Status = StatusError
+		if auth.StatusMessage == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(auth.StatusMessage)), "disabled") {
+			if existing != nil && existing.StatusMessage != "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(existing.StatusMessage)), "disabled") {
+				auth.StatusMessage = existing.StatusMessage
+			} else {
+				auth.StatusMessage = "unauthorized (refresh token invalid)"
+			}
+		}
+		if auth.RefreshError != nil && auth.RefreshError.Code == "refresh_outcome_unknown" {
+			// Use refreshAccessError so a diagnostic 401 from an unknown SIWC refresh
+			// does not escalate into a terminal unauthorized block for valid outer tokens.
+			auth.LastError = refreshAccessError(auth, auth.RefreshError.Message, rejectedAccessBlocked, hasUnauthorizedAuthFailure(existing))
+			if auth.LastError != nil && auth.LastError.Code == "refresh_outcome_unknown" {
+				auth.StatusMessage = auth.LastError.Message
+			}
+		} else if auth.LastError == nil {
+			if auth.RefreshError != nil {
+				auth.LastError = refreshAccessError(auth, auth.RefreshError.Message, rejectedAccessBlocked, hasUnauthorizedAuthFailure(existing))
+			} else if existing != nil && existing.LastError != nil && !isTOSViolationResultError(existing.LastError) {
+				auth.LastError = cloneError(existing.LastError)
+			}
+		}
+		return true
+	}
+	prevUnavailable := auth.Unavailable
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+	} else if auth.Unavailable &&
+		!auth.NextRetryAfter.After(now) &&
+		!(auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)) &&
+		!auth.credentialRetryAfter.After(now) &&
+		!effectiveAuthForceUntil(auth).After(now) {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		applyCooldownFields(&auth.Quota, QuotaState{})
+	}
+	if auth.Unavailable != prevUnavailable {
+		changed = true
+	}
+	if !auth.Unavailable && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+		auth.LastError = nil
+	}
+	return changed
+}
+
+func hasRejectedActiveAccessToken(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if IsCodexUseSIWC(auth) {
+		token := authSIWCTokenField(auth, "access_token")
+		return (auth.RejectedSIWCAccessToken != "" && token == auth.RejectedSIWCAccessToken) ||
+			(auth.RejectedAccessToken != "" && token == auth.RejectedAccessToken)
+	}
+	token := authOuterAccessToken(auth)
+	return auth.RejectedAccessToken != "" && token == auth.RejectedAccessToken
+}
+
+// IsOrphanedAuthUnavailable reports whether auth carries an unexplained
+// auth-level Unavailable=true flag with StatusActive, empty error details,
+// no quota exhaustion, no retry/cooldown deadline, no model errors, and no
+// unresolved sign-in or token-rejection block.
+func IsOrphanedAuthUnavailable(auth *Auth, now time.Time) bool {
+	return isOrphanedAuthUnavailable(auth, now)
+}
+
+func isOrphanedAuthUnavailable(auth *Auth, now time.Time) bool {
+	if auth == nil || !auth.Unavailable || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if auth.Status != StatusActive {
+		return false
+	}
+	if strings.TrimSpace(auth.StatusMessage) != "" || auth.LastError != nil {
+		return false
+	}
+	if auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() || !auth.NextRetryAfter.IsZero() {
+		return false
+	}
+	if auth.credentialRetryAfter.After(now) || effectiveAuthForceUntil(auth).After(now) {
+		return false
+	}
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return false
+	}
+	if hasUnauthorizedAuthFailure(auth) || (auth.RequiresSignIn && !auth.HasValidAccessToken(now)) {
+		return false
+	}
+	if hasRejectedActiveAccessToken(auth) {
+		return false
+	}
+	if hasModelError(auth, now) {
+		return false
+	}
+	return true
+}
+
+// reconcileOrphanedAuthUnavailable clears a stale auth.Unavailable flag carried
+// across file-snapshot reloads when an enabled credential has StatusActive, no
+// active cooldown deadline, no model errors, and no unresolved auth/token block.
+func reconcileOrphanedAuthUnavailable(auth *Auth, now time.Time) bool {
+	if !isOrphanedAuthUnavailable(auth, now) {
+		return false
+	}
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+		return !auth.Unavailable
+	}
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	return true
 }
 
 func equalErrorPtr(a, b *Error) bool {

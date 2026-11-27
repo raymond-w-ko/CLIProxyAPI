@@ -263,11 +263,28 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var refreshErr error
+	if s.coreManager != nil {
+		s.shutdownRefreshWaiters.Add(1)
+		errStopRefresh := s.coreManager.StopAutoRefreshContext(ctx)
+		if errStopRefresh != nil {
+			log.Errorf("failed to stop auth auto-refresh: %v", errStopRefresh)
+			refreshErr = errStopRefresh
+			if s.shutdownRefreshWaiters.Add(-1) > 0 || !s.shutdownCleanupStarted.CompareAndSwap(false, true) {
+				return refreshErr
+			}
+		} else {
+			s.shutdownRefreshWaiters.Add(-1)
+		}
+	}
+
 	var shutdownErr error
 	s.shutdownOnce.Do(func() {
-		if ctx == nil {
-			ctx = context.Background()
-		}
+		s.shutdownCleanupStarted.Store(true)
 
 		s.homeMu.Lock()
 		runCancel := s.runCancel
@@ -333,8 +350,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		s.homeLifecycleMu.Unlock()
 
-		// legacy refresh loop removed; only stopping core auth manager below
-
 		s.cfgMu.RLock()
 		watcherCancel := s.watcherCancel
 		s.cfgMu.RUnlock()
@@ -343,12 +358,11 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopClaudeQuotaRefresh()
-			s.coreManager.StopAutoRefresh()
 		}
 		if watcher := s.currentWatcher(); watcher != nil {
 			if err := watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)
-				shutdownErr = err
+				shutdownErr = errors.Join(shutdownErr, err)
 			}
 		}
 		if s.wsGateway != nil {
@@ -417,7 +431,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		helps.RetireProxyPoolPublisher(s.proxyPoolPublisher)
 		usage.StopDefault()
 	})
-	return shutdownErr
+	return errors.Join(refreshErr, shutdownErr)
 }
 
 func (s *Service) ensureAuthDir() error {

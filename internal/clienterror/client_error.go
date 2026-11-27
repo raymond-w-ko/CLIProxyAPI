@@ -465,6 +465,25 @@ func IsCreditBalanceTooLow(status int, err error) bool {
 	return hasCreditBalanceTooLowBody(err)
 }
 
+// IsCodexBillingQuota reports whether a Codex error carries a structured billing rejection.
+func IsCodexBillingQuota(body string) bool {
+	if body == "" {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "body.error.type", "response.error.type"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.Get(body, path).String()), "insufficient_quota") {
+			return true
+		}
+	}
+	for _, path := range []string{"error.code", "code", "body.error.code", "response.error.code"} {
+		switch strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())) {
+		case "insufficient_quota", "credit_balance_exhausted":
+			return true
+		}
+	}
+	return false
+}
+
 func unwrapKnownErrorWrapper(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	const streamTerminatedPrefix = "responses stream terminated after "
